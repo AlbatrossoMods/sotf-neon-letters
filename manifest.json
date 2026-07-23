@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/ToniMacaroni/RedLoader/main/MetadataSchema.json",
+  "id": "SOTFNeonLetters",
+  "author": "Personal",
+  "version": "0.2.0",
+  "description": "Placeable craftable small neon English letters A-Z.",
+  "gameVersion": "1.0.0",
+  "type": "Mod",
+  "url": "..."
+}

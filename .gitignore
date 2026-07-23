@@ -1,0 +1,31 @@
+# Build output
+bin/
+obj/
+ReleaseBuild/
+
+# Local toolchains and downloaded dependencies
+.tools/
+
+# Local game and IDE paths
+SOTFNeonLetters.csproj.user
+.run/
+
+# IDE and OS noise
+.DS_Store
+.idea/**/workspace.xml
+.idea/**/usage.statistics.xml
+
+# Unity generated state and asset build output
+unity/SOTFNeonLetters.Assets/Library/
+unity/SOTFNeonLetters.Assets/Temp/
+unity/SOTFNeonLetters.Assets/Logs/
+unity/SOTFNeonLetters.Assets/Obj/
+unity/SOTFNeonLetters.Assets/UserSettings/
+unity/SOTFNeonLetters.Assets/Assets/GeneratedSource/
+unity/SOTFNeonLetters.Assets/Assets/GeneratedSource.meta
+unity/SOTFNeonLetters.Assets/Assets/Generated/
+unity/SOTFNeonLetters.Assets/Assets/Generated.meta
+unity/SOTFNeonLetters.Assets/Build/
+unity/SOTFNeonLetters.Assets/Assets/Generated*
+unity/SOTFNeonLetters.Assets/Assets/GeneratedSource*
+unity/SOTFNeonLetters.Assets/Build*/

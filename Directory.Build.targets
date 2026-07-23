@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project>
+    <PropertyGroup>
+        <NeonLetterAssetBundleName>sotfneonletters</NeonLetterAssetBundleName>
+        <NeonLetterAssetBundlePath>$(MSBuildThisFileDirectory)unity/SOTFNeonLetters.Assets/Build/AssetBundles/Windows/$(NeonLetterAssetBundleName)</NeonLetterAssetBundlePath>
+        <NeonLetterManifestPath>$(TargetDir)manifest.json</NeonLetterManifestPath>
+        <NeonLetterReleaseBuildDir>$(MSBuildThisFileDirectory)ReleaseBuild</NeonLetterReleaseBuildDir>
+        <NeonLetterBuildModDir>$(NeonLetterReleaseBuildDir)/$(AssemblyName)</NeonLetterBuildModDir>
+        <NeonLetterZipFile>$(NeonLetterReleaseBuildDir)/$(AssemblyName).zip</NeonLetterZipFile>
+        <NeonLetterReleasePackagerProject>$(MSBuildThisFileDirectory)tools/SOTFNeonLetters.ReleasePackager/SOTFNeonLetters.ReleasePackager.csproj</NeonLetterReleasePackagerProject>
+        <NeonLetterReleasePackagerDll>$(MSBuildThisFileDirectory)tools/SOTFNeonLetters.ReleasePackager/bin/Release/net6.0/SOTFNeonLetters.ReleasePackager.dll</NeonLetterReleasePackagerDll>
+        <NeonLetterDotNetHost Condition="'$(DOTNET_ROOT)' != ''">$(DOTNET_ROOT)/dotnet</NeonLetterDotNetHost>
+        <NeonLetterDotNetHost Condition="'$(NeonLetterDotNetHost)' == ''">dotnet</NeonLetterDotNetHost>
+    </PropertyGroup>
+
+    <Target Name="ValidateNeonLetterAssetBundle"
+            AfterTargets="Build"
+            Condition="'$(MSBuildProjectName)' == 'SOTFNeonLetters'">
+        <Warning Text="Unity asset bundle is missing: $(NeonLetterAssetBundlePath). Debug C# build will continue; build Unity assets after activating the Unity license."
+                 Condition="'$(Configuration)' == 'Debug' AND !Exists('$(NeonLetterAssetBundlePath)')"/>
+        <Error Text="Unity asset bundle is required for Release: $(NeonLetterAssetBundlePath). Run tools/build-unity-assets.sh first."
+               Condition="'$(Configuration)' == 'Release' AND !Exists('$(NeonLetterAssetBundlePath)')"/>
+        <Error Text="Compiled mod DLL is required for Release packaging: $(TargetPath)."
+               Condition="'$(Configuration)' == 'Release' AND !Exists('$(TargetPath)')"/>
+        <Error Text="Mod manifest is required for Release packaging: $(NeonLetterManifestPath)."
+               Condition="'$(Configuration)' == 'Release' AND !Exists('$(NeonLetterManifestPath)')"/>
+    </Target>
+
+    <Target Name="CopyToGame"
+            AfterTargets="Build"
+            DependsOnTargets="ValidateNeonLetterAssetBundle"
+            Condition="'$(MSBuildProjectName)' == 'SOTFNeonLetters' AND '$(DisableCopyToGame)' != 'True'">
+        <PropertyGroup>
+            <CanCopyToGame>True</CanCopyToGame>
+            <CanCopyToGame Condition="!Exists('$(GameDir)')">False</CanCopyToGame>
+        </PropertyGroup>
+
+        <Warning Text="Unable to copy mod to game folder because GameDir does not exist: $(GameDir)."
+                 Condition="'$(CanCopyToGame)' != 'True'"/>
+        <Warning Text="Manifest is missing and cannot be copied: $(NeonLetterManifestPath)."
+                 Condition="'$(CanCopyToGame)' == 'True' AND !Exists('$(NeonLetterManifestPath)')"/>
+        <Message Text="Copying '$(AssemblyName)' to '$(GameDir)'."
+                 Importance="high"
+                 Condition="'$(CanCopyToGame)' == 'True'"/>
+        <MakeDir Directories="$(GameDir)/Mods/$(AssemblyName)"
+                 Condition="'$(CanCopyToGame)' == 'True'"/>
+        <Copy SourceFiles="$(TargetPath)"
+              DestinationFiles="$(GameDir)/Mods/$(AssemblyName).dll"
+              Condition="'$(CanCopyToGame)' == 'True'"/>
+        <Copy SourceFiles="$(TargetDir)$(AssemblyName).pdb"
+              DestinationFiles="$(GameDir)/Mods/$(AssemblyName).pdb"
+              Condition="'$(CanCopyToGame)' == 'True' AND Exists('$(TargetDir)$(AssemblyName).pdb')"/>
+        <Copy SourceFiles="$(NeonLetterManifestPath)"
+              DestinationFiles="$(GameDir)/Mods/$(AssemblyName)/manifest.json"
+              Condition="'$(CanCopyToGame)' == 'True' AND Exists('$(NeonLetterManifestPath)')"/>
+        <Copy SourceFiles="$(NeonLetterAssetBundlePath)"
+              DestinationFiles="$(GameDir)/Mods/$(AssemblyName)/$(NeonLetterAssetBundleName)"
+              Condition="'$(CanCopyToGame)' == 'True' AND Exists('$(NeonLetterAssetBundlePath)')"/>
+    </Target>
+
+    <Target Name="CreateModDir"
+            AfterTargets="Build"
+            DependsOnTargets="ValidateNeonLetterAssetBundle"
+            Condition="'$(MSBuildProjectName)' == 'SOTFNeonLetters' AND '$(Configuration)' == 'Release'">
+        <Message Text="Creating mod directory at '$(NeonLetterBuildModDir)'." Importance="high"/>
+        <RemoveDir Directories="$(NeonLetterBuildModDir)"
+                   Condition="Exists('$(NeonLetterBuildModDir)')"/>
+        <MakeDir Directories="$(NeonLetterBuildModDir)/Mods/$(AssemblyName)"/>
+        <Copy SourceFiles="$(TargetPath)"
+              DestinationFiles="$(NeonLetterBuildModDir)/Mods/$(AssemblyName).dll"/>
+        <Copy SourceFiles="$(NeonLetterManifestPath)"
+              DestinationFiles="$(NeonLetterBuildModDir)/Mods/$(AssemblyName)/manifest.json"/>
+        <Copy SourceFiles="$(NeonLetterAssetBundlePath)"
+              DestinationFiles="$(NeonLetterBuildModDir)/Mods/$(AssemblyName)/$(NeonLetterAssetBundleName)"/>
+    </Target>
+
+    <Target Name="CreateZip"
+            AfterTargets="Build"
+            DependsOnTargets="CreateModDir"
+            Condition="'$(MSBuildProjectName)' == 'SOTFNeonLetters' AND '$(Configuration)' == 'Release'">
+        <Message Text="Creating zip file at '$(NeonLetterZipFile)'." Importance="high"/>
+        <MSBuild Projects="$(NeonLetterReleasePackagerProject)"
+                 Targets="Restore;Build"
+                 Properties="Configuration=Release"/>
+        <Error Text="Deterministic release packager is missing: $(NeonLetterReleasePackagerDll)."
+               Condition="!Exists('$(NeonLetterReleasePackagerDll)')"/>
+        <Exec Command="&quot;$(NeonLetterDotNetHost)&quot; &quot;$(NeonLetterReleasePackagerDll)&quot; &quot;$(NeonLetterBuildModDir)&quot; &quot;$(NeonLetterZipFile)&quot;"/>
+    </Target>
+</Project>

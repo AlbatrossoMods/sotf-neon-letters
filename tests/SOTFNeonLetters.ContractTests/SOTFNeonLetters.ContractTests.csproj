@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <Import Project="../../SOTFNeonLetters.csproj.user"
+            Condition="Exists('../../SOTFNeonLetters.csproj.user')" />
+
+    <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net6.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Reference Include="Alt.Json">
+            <HintPath>$(GameDir)/_RedLoader/net6/Alt.Json.dll</HintPath>
+        </Reference>
+        <Reference Include="RedLoader">
+            <HintPath>$(GameDir)/_RedLoader/net6/RedLoader.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.CoreModule">
+            <HintPath>$(GameDir)/_RedLoader/Game/UnityEngine.CoreModule.dll</HintPath>
+        </Reference>
+        <Compile Include="../../NeonLetterASmallDefinition.cs"
+                 Link="NeonLetterASmallDefinition.cs" />
+        <Compile Include="../../NeonLetterColorPolicy.cs"
+                 Link="NeonLetterColorPolicy.cs" />
+        <Compile Include="../../NeonLetterEmissionPolicy.cs"
+                 Link="NeonLetterEmissionPolicy.cs" />
+        <Compile Include="../../NeonLetterColorInteractionPolicy.cs"
+                 Link="NeonLetterColorInteractionPolicy.cs" />
+        <Compile Include="../../NeonLetterMultiplayerPolicy.cs"
+                 Link="NeonLetterMultiplayerPolicy.cs" />
+        <Compile Include="../../NeonLetterMultiplayerState.cs"
+                 Link="NeonLetterMultiplayerState.cs" />
+        <Compile Include="../../NeonLetterMultiplayerPersistencePolicy.cs"
+                 Link="NeonLetterMultiplayerPersistencePolicy.cs" />
+        <Compile Include="../../NeonLetterColorPersistencePolicy.cs"
+                 Link="NeonLetterColorPersistencePolicy.cs" />
+        <Compile Include="../../NeonLetterRuntimePolicy.cs"
+                 Link="NeonLetterRuntimePolicy.cs" />
+        <Compile Include="../../NeonSymbolManifest.cs"
+                 Link="NeonSymbolManifest.cs" />
+        <Compile Include="../../NeonLetterSmallCatalog.cs"
+                 Link="NeonLetterSmallCatalog.cs" />
+    </ItemGroup>
+
+</Project>

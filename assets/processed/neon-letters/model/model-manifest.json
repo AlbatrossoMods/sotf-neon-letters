@@ -1,0 +1,32 @@
+{
+  "model": "NeonLetters_NoBackground.dae",
+  "count": 26,
+  "objects": [
+    { "letter": "A", "nodeId": "g Letters A", "geometryId": "meshId6" },
+    { "letter": "B", "nodeId": "g Letters B", "geometryId": "meshId21" },
+    { "letter": "C", "nodeId": "g C Letters", "geometryId": "meshId0" },
+    { "letter": "D", "nodeId": "g Letters D", "geometryId": "meshId2" },
+    { "letter": "E", "nodeId": "g Letters E", "geometryId": "meshId4" },
+    { "letter": "F", "nodeId": "g Letters F", "geometryId": "meshId24" },
+    { "letter": "G", "nodeId": "g Letters G", "geometryId": "meshId25" },
+    { "letter": "H", "nodeId": "g Letters H", "geometryId": "meshId1" },
+    { "letter": "I", "nodeId": "g Letters I", "geometryId": "meshId13" },
+    { "letter": "J", "nodeId": "g Letters J", "geometryId": "meshId23" },
+    { "letter": "K", "nodeId": "g Letters K", "geometryId": "meshId5" },
+    { "letter": "L", "nodeId": "g Letters L", "geometryId": "meshId18" },
+    { "letter": "M", "nodeId": "g Letters M", "geometryId": "meshId7" },
+    { "letter": "N", "nodeId": "g Letters N", "geometryId": "meshId12" },
+    { "letter": "O", "nodeId": "g Letters O", "geometryId": "meshId11" },
+    { "letter": "P", "nodeId": "g Letters P", "geometryId": "meshId20" },
+    { "letter": "Q", "nodeId": "g Letters Q", "geometryId": "meshId22" },
+    { "letter": "R", "nodeId": "g Letters R", "geometryId": "meshId10" },
+    { "letter": "S", "nodeId": "g Letters S", "geometryId": "meshId14" },
+    { "letter": "T", "nodeId": "g Letters T", "geometryId": "meshId9" },
+    { "letter": "U", "nodeId": "g Letters U", "geometryId": "meshId19" },
+    { "letter": "V", "nodeId": "g Letters V", "geometryId": "meshId17" },
+    { "letter": "W", "nodeId": "g Letters W", "geometryId": "meshId16" },
+    { "letter": "X", "nodeId": "g Letters X", "geometryId": "meshId3" },
+    { "letter": "Y", "nodeId": "g Letters Y", "geometryId": "meshId8" },
+    { "letter": "Z", "nodeId": "g Letters Z", "geometryId": "meshId15" }
+  ]
+}

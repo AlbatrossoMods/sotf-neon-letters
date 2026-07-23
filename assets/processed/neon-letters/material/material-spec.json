@@ -1,0 +1,85 @@
+{
+  "name": "Neon Letters Material",
+  "status": "material-data-specification-only",
+  "shader": {
+    "name": null,
+    "note": "No Unity shader is created or assumed by this specification. The eventual shader must be validated against the Sons of the Forest runtime."
+  },
+  "assetBundle": {
+    "built": false,
+    "note": "This specification does not represent a built asset bundle."
+  },
+  "textureDirectory": "../textures",
+  "assignments": {
+    "emissionMask": {
+      "file": "NeonLetters_EmissionMask.png",
+      "required": true,
+      "srgb": true,
+      "dimensions": "1x1",
+      "content": "Solid white",
+      "purpose": "Enables emission over the letter material; the glow color is supplied by the material parameter."
+    },
+    "normal": {
+      "file": "NeonLetters_Normal_Source.png",
+      "required": false,
+      "textureType": "Normal map",
+      "srgb": false
+    },
+    "smoothness": {
+      "file": "NeonLetters_Smoothness.png",
+      "required": false,
+      "srgb": false,
+      "derivedFrom": "NeonLetters_Roughness_Source.png",
+      "conversion": "smoothness = 1 - roughness"
+    }
+  },
+  "materialParameters": {
+    "glowColor": {
+      "source": "material parameter",
+      "required": true,
+      "note": "Set per material or material instance; do not bake the color into EmissionMask."
+    },
+    "baseColor": {
+      "source": "material parameter",
+      "required": true,
+      "note": "Do not use the brick-background albedo source as the final base color."
+    }
+  },
+  "excludedSourceTextures": [
+    {
+      "file": "NeonLetters_Albedo_Source.png",
+      "reason": "Contains a brick background."
+    },
+    {
+      "file": "NeonLetters_Emissive_Source.png",
+      "reason": "Contains black emissive data; use the white 1x1 EmissionMask instead."
+    },
+    {
+      "file": "NeonLetters_Metallic_Source.png",
+      "reason": "Contains black data and is not a reliable final metallic map."
+    },
+    {
+      "file": "NeonLetters_Roughness_Source.png",
+      "reason": "Use only as the source for the prepared Smoothness map, not as a direct final input."
+    }
+  ],
+  "sizes": {
+    "reference": "Horizontal full-length log",
+    "unit": "relative uniform scale",
+    "variants": {
+      "small": {
+        "scale": 1,
+        "targetHeight": "approximately one horizontal log"
+      },
+      "medium": {
+        "scale": 2,
+        "targetHeight": "approximately two horizontal logs"
+      },
+      "large": {
+        "scale": 3,
+        "targetHeight": "approximately three horizontal logs"
+      }
+    },
+    "note": "All sizes share the same textures and material parameters. Exact world units and pivots require target-runtime validation."
+  }
+}

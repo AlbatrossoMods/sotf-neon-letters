@@ -1,0 +1,28 @@
+{
+  "source": "assets/source/neon-letters/textures",
+  "outputs": {
+    "sourceAlbedo": "textures/NeonLetters_Albedo_Source.png",
+    "sourceEmissive": "textures/NeonLetters_Emissive_Source.png",
+    "sourceMetallic": "textures/NeonLetters_Metallic_Source.png",
+    "sourceNormal": "textures/NeonLetters_Normal_Source.png",
+    "sourceRoughness": "textures/NeonLetters_Roughness_Source.png",
+    "smoothnessReference": "textures/NeonLetters_Smoothness.png",
+    "emissionMask": "textures/NeonLetters_EmissionMask.png"
+  },
+  "unityImport": {
+    "sourceAlbedo": { "sRGB": true, "role": "referenceOnly" },
+    "sourceEmissive": { "sRGB": true, "role": "referenceOnly; source is black" },
+    "sourceMetallic": { "sRGB": false, "role": "referenceOnly; source is black" },
+    "sourceNormal": { "textureType": "NormalMap", "sRGB": false, "role": "referenceOnly" },
+    "sourceRoughness": { "sRGB": false, "role": "referenceOnly" },
+    "smoothnessReference": { "sRGB": false, "role": "referenceOnly; smoothness = 1 - roughness" },
+    "emissionMask": { "sRGB": false, "role": "white mask; set neon color in material" }
+  },
+  "notes": [
+    "The source JPEG files remain untouched.",
+    "The downloaded albedo and normal maps contain the brick background; the downloaded emissive and metallic maps are black.",
+    "The final letter material should use the emission mask with a chosen neon color rather than the downloaded emissive map.",
+    "The BG mesh must be removed from the model before it becomes a game prefab.",
+    "The final material and shader still need to be verified in Unity 2022.2.16f1."
+  ]
+}
