@@ -1,6 +1,6 @@
 # Unity Asset Pipeline
 
-This repository contains the Unity 2022.2.16f1 asset project for the playable Small A-Z neon alphabet.
+This repository contains the Unity 2022.2.16f1 asset project for 80 playable Small neon symbols: English A-Z, Cyrillic А-Я including Ё, digits 0-9, and `! # $ & * + , - . = ?`.
 `Packages/manifest.json` pins `com.unity.render-pipelines.high-definition` 14.0.7, the HDRP package for Unity 2022.2.
 
 From the repository root, run:
@@ -21,19 +21,19 @@ The wrapper uses the native Unity 2022.2.16f1 editor at `/Applications/Unity/Hub
 
 Every Small letter is independently normalized to a `0.5f` target height, matching the approximate diameter of one horizontal log. Its proportions remain unchanged and its root pivot is bottom-centered.
 
-The bundle contains exactly 65 explicitly mapped assets, plus their material and mesh dependencies:
+The bundle contains 200 explicitly mapped symbol assets, plus their material and mesh dependencies: 80 prefabs, 80 book icons, and 40 paired book pages.
 
 ```text
-Assets/Generated/Prefabs/NeonLetter_{A-Z}_Small.prefab
-Assets/Generated/Textures/NeonLetter_{A-Z}_Small_Icon.asset
-Assets/Generated/Textures/NeonLetters_Small_Page_{01-13}.asset
+Assets/Generated/Prefabs/NeonLetter_{asset-key}_Small.prefab
+Assets/Generated/Textures/NeonLetter_{asset-key}_Small_Icon.asset
+Assets/Generated/Textures/NeonLetters_Small_Page_{01-40}.asset
 ```
 
-Their short runtime addresses match those names without the `.prefab` or `.asset` suffixes.
+Each `asset-key` comes from the canonical catalog order: English alphabet, Cyrillic alphabet, digits, then punctuation. The short runtime addresses match those names without the `.prefab` or `.asset` suffixes.
 
-Each prefab has two top-level visible ingredient children. `Ingredient_LightBulb_{A-Z}` is the matching imported DAE letter subtree; `Ingredient_Wire_Lead` is the same short LineRenderer lead used by the working A prefab. Both materials require `HDRP/Lit`; there is no URP or built-in shader fallback. The builder sets HDRP 14 `_BaseColor`, `_Metallic`, and `_Smoothness`; the letter additionally uses `_EmissiveColorMap`, `_EmissiveColorLDR`, `_UseEmissiveIntensity`, `_EmissiveIntensity` in nits, `_EmissiveIntensityUnit`, and `_EmissiveExposureWeight`, enables double-sided rendering, then runs HDRP keyword validation and requires `_EMISSIVE_COLOR_MAP`. The prefab does not author a collider; SonsSdk creates the runtime collider, which the mod resizes to the visible local bounds.
+Each prefab has two top-level visible ingredient children. `Ingredient_LightBulb_{asset-key}` is the matching imported symbol subtree; `Ingredient_Wire_Lead` is the same short LineRenderer lead used by the working A prefab. Both materials require `HDRP/Lit`; there is no URP or built-in shader fallback. The builder sets HDRP 14 `_BaseColor`, `_Metallic`, and `_Smoothness`; the letter additionally uses `_EmissiveColorMap`, `_EmissiveColorLDR`, `_UseEmissiveIntensity`, `_EmissiveIntensity` in nits, `_EmissiveIntensityUnit`, and `_EmissiveExposureWeight`, enables double-sided rendering, then runs HDRP keyword validation and requires `_EMISSIVE_COLOR_MAP`. The prefab does not author a collider; SonsSdk creates the runtime collider, which the mod resizes to the visible local bounds.
 
-Each 1024x1024 DXT1 page has 11 mip levels and contains two matching letter icons in the upper and lower recipe cards. Each 128x128 DXT1 icon has 8 mip levels and is rasterized from that letter's own DAE triangles with safe margins. The textures do not use imported fonts or Signs assets.
+Each 1024x1024 DXT1 page has 11 mip levels and contains two matching symbol icons in the upper and lower recipe cards. Each 128x128 DXT1 icon has 8 mip levels and is rasterized from that symbol's own source geometry with safe margins. The textures do not use imported fonts or Signs assets.
 
 After the Unity build, the runtime bundle path is:
 

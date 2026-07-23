@@ -57,16 +57,16 @@ void CheckReleaseAssemblyMetadata()
     }
 
     Version? assemblyVersion = AssemblyName.GetAssemblyName(releaseDllPath).Version;
-    CheckEqual(new Version(0, 2, 0, 0), assemblyVersion, "assembly version is 0.2.0.0");
+    CheckEqual(new Version(0, 3, 0, 0), assemblyVersion, "assembly version is 0.3.0.0");
 
     FileVersionInfo fileVersion = FileVersionInfo.GetVersionInfo(releaseDllPath);
-    CheckEqual("0.2.0.0", fileVersion.FileVersion, "file version is 0.2.0.0");
+    CheckEqual("0.3.0.0", fileVersion.FileVersion, "file version is 0.3.0.0");
 
     Assembly releaseAssembly = Assembly.LoadFile(releaseDllPath);
     string? informationalVersion = releaseAssembly
         .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
         ?.InformationalVersion;
-    CheckEqual("0.2.0", informationalVersion, "informational version is 0.2.0");
+    CheckEqual("0.3.0", informationalVersion, "informational version is 0.3.0");
 }
 
 void CheckReleaseAssemblyPaths()
@@ -105,12 +105,15 @@ void CheckManifest()
 
     using JsonDocument manifest = JsonDocument.Parse(manifestBytes);
     JsonElement root = manifest.RootElement;
-    CheckEqual("0.2.0", root.GetProperty("version").GetString(), "manifest version is 0.2.0");
+    CheckEqual("0.3.0", root.GetProperty("version").GetString(), "manifest version is 0.3.0");
     CheckEqual(
-        "Placeable craftable small neon English letters A-Z.",
+        "Buildable small neon symbols: English A-Z, Cyrillic А-Я (including Ё), digits 0-9, and punctuation.",
         root.GetProperty("description").GetString(),
-        "manifest describes only the released small A-Z letters");
-    Check(root.TryGetProperty("url", out _), "manifest retains the schema-required URL field");
+        "manifest describes the released small symbol catalog");
+    CheckEqual(
+        "https://github.com/AlbatrossoMods/sotf-neon-letters",
+        root.GetProperty("url").GetString(),
+        "manifest links to the permanent source repository");
 }
 
 void CheckReadme()
@@ -121,6 +124,18 @@ void CheckReadme()
         string.IsNullOrEmpty(userProfile) ||
         !readme.Contains(userProfile, StringComparison.Ordinal),
         "README omits the local user profile path");
+    Check(readme.Contains("80 small neon symbols", StringComparison.Ordinal),
+        "README documents the 80-symbol catalog");
+    Check(readme.Contains("Neon Symbols", StringComparison.Ordinal),
+        "README names the blueprint-book section");
+    Check(readme.Contains("English A-Z", StringComparison.Ordinal),
+        "README documents the English alphabet");
+    Check(readme.Contains("Cyrillic А-Я (including Ё)", StringComparison.Ordinal),
+        "README documents the Cyrillic alphabet");
+    Check(readme.Contains("digits 0-9", StringComparison.Ordinal),
+        "README documents the digits");
+    Check(readme.Contains("! # $ & * + , - . = ?", StringComparison.Ordinal),
+        "README documents the punctuation symbols");
 }
 
 void CheckDeterministicZip()

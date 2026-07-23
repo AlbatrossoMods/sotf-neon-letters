@@ -13,7 +13,10 @@ isolated_root="$(mktemp -d "${TMPDIR:-/tmp}/sotf-neon-clean-release.XXXXXX")"
 tracked_checkout="$isolated_root/checkout"
 expected_zip="$isolated_root/SOTFNeonLetters.expected.zip"
 actual_zip="$tracked_checkout/ReleaseBuild/SOTFNeonLetters.zip"
-dotnet_toolchain="$repo_root/.tools/dotnet-6"
+index_tree_file="$isolated_root/index-tree"
+dotnet_executable="${SOTF_NEON_DOTNET:-$repo_root/.tools/dotnet-6/dotnet}"
+dotnet_toolchain="$(dirname "$dotnet_executable")"
+local_game_settings="$repo_root/SOTFNeonLetters.csproj.user"
 
 cleanup() {
   rm -rf "$isolated_root"
@@ -21,22 +24,30 @@ cleanup() {
 
 trap cleanup EXIT
 
-for required_tool in awk cmp cp find git ln mkdir mktemp rm shasum; do
+for required_tool in awk cmp find git ln mkdir mktemp rm shasum tar; do
   command -v "$required_tool" >/dev/null 2>&1 || \
     fail "Required tool is unavailable: $required_tool"
 done
 
-[[ -x "$dotnet_toolchain/dotnet" ]] || \
-  fail "Repository-local .NET 6 toolchain is missing: $dotnet_toolchain/dotnet"
+[[ -x "$dotnet_executable" ]] || \
+  fail "A runnable .NET SDK executable is required; set SOTF_NEON_DOTNET or install $repo_root/.tools/dotnet-6/dotnet"
+
+if [[ -n "${SOTF_NEON_GAME_DIR:-}" ]]; then
+  game_dir="$SOTF_NEON_GAME_DIR"
+elif [[ -f "$local_game_settings" ]]; then
+  game_dir="$(awk -F '[<>]' '/<GameDir>/ { print $3; exit }' "$local_game_settings")"
+else
+  fail "Set SOTF_NEON_GAME_DIR or create SOTFNeonLetters.csproj.user from the provided template."
+fi
+
+[[ -d "$game_dir" ]] || \
+  fail "Configured game directory does not exist: $game_dir"
 
 mkdir -p "$tracked_checkout"
-while IFS= read -r -d '' tracked_path; do
-  source_path="$repo_root/$tracked_path"
-  destination_path="$tracked_checkout/$tracked_path"
-  [[ -f "$source_path" ]] || fail "Tracked input is missing: $tracked_path"
-  mkdir -p "$(dirname "$destination_path")"
-  cp -p "$source_path" "$destination_path"
-done < <(git -C "$repo_root" ls-files -z)
+git -C "$repo_root" write-tree > "$index_tree_file"
+read -r index_tree < "$index_tree_file"
+git -C "$repo_root" archive --format=tar "$index_tree" | \
+  tar -xf - -C "$tracked_checkout"
 
 cp -p "$tracked_checkout/ReleaseBuild/SOTFNeonLetters.zip" "$expected_zip"
 
@@ -53,7 +64,10 @@ printf 'Cold tracked-input checkout contains no bin/obj directories.\n'
 mkdir -p "$tracked_checkout/.tools/dotnet-cli"
 ln -s "$dotnet_toolchain" "$tracked_checkout/.tools/dotnet-6"
 
-SOTF_NEON_COLD_RELEASE_ACTIVE=1 "$tracked_checkout/tools/test-all.sh"
+SOTF_NEON_COLD_RELEASE_ACTIVE=1 \
+SOTF_NEON_DOTNET="$dotnet_executable" \
+SOTF_NEON_GAME_DIR="$game_dir" \
+"$tracked_checkout/tools/test-all.sh"
 
 [[ -s "$actual_zip" ]] || fail "Cold full release gate produced no release ZIP."
 if ! cmp -s "$expected_zip" "$actual_zip"; then

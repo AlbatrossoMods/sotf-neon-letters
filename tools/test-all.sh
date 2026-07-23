@@ -4,19 +4,51 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
-dotnet="$repo_root/.tools/dotnet-6/dotnet"
+local_dotnet="$repo_root/.tools/dotnet-6/dotnet"
 
-export DOTNET_ROOT="$repo_root/.tools/dotnet-6"
+if [[ -n "${SOTF_NEON_DOTNET:-}" ]]; then
+  dotnet="$SOTF_NEON_DOTNET"
+elif [[ -x "$local_dotnet" ]]; then
+  dotnet="$local_dotnet"
+elif command -v dotnet >/dev/null 2>&1; then
+  dotnet="$(command -v dotnet)"
+else
+  printf 'Error: install .NET SDK 6 or set SOTF_NEON_DOTNET to its executable.\n' >&2
+  exit 1
+fi
+
+[[ -x "$dotnet" ]] || {
+  printf 'Error: .NET executable is not runnable: %s\n' "$dotnet" >&2
+  exit 1
+}
+
 export DOTNET_CLI_HOME="$repo_root/.tools/dotnet-cli"
+export PATH="$(dirname "$dotnet"):$PATH"
+export SOTF_NEON_DOTNET="$dotnet"
 
-"$dotnet" run \
+if [[ "$dotnet" == "$local_dotnet" || -n "${DOTNET_ROOT:-}" ]]; then
+  export DOTNET_ROOT="${DOTNET_ROOT:-$(dirname "$dotnet")}"
+fi
+
+contract_arguments=(
+  run
   --project "$repo_root/tests/SOTFNeonLetters.ContractTests/SOTFNeonLetters.ContractTests.csproj"
+)
+build_arguments=(
+  build "$repo_root/SOTFNeonLetters.csproj"
+  --configuration Release
+  -p:DisableCopyToGame=True
+)
+if [[ -n "${SOTF_NEON_GAME_DIR:-}" ]]; then
+  contract_arguments+=("-p:GameDir=$SOTF_NEON_GAME_DIR")
+  build_arguments+=("-p:GameDir=$SOTF_NEON_GAME_DIR")
+fi
+
+"$dotnet" "${contract_arguments[@]}"
 
 "$repo_root/tools/test-unity-assets.sh"
 
-"$dotnet" build "$repo_root/SOTFNeonLetters.csproj" \
-  --configuration Release \
-  -p:DisableCopyToGame=True
+"$dotnet" "${build_arguments[@]}"
 
 "$dotnet" run \
   --project "$repo_root/tests/SOTFNeonLetters.ReleaseTests/SOTFNeonLetters.ReleaseTests.csproj" \
