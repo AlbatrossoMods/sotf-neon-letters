@@ -4,15 +4,11 @@ RedLoader/SonsSdk mod for buildable small neon symbols in Sons of the Forest.
 
 Version 0.3.1 contains 80 small neon symbols: English A-Z, Cyrillic А-Я (including Ё), digits 0-9, and `! # $ & * + , - . = ?`. They are available as forty paired pages in the game's Blueprints book under the `Neon Symbols` page title, in this order: English alphabet, Cyrillic alphabet, digits, then punctuation.
 
-Each symbol uses the standard SonsSdk placement and crafting flow, costs exactly one Wire (item 418) and one Light Bulb (item 635), and can be mounted on a wall. Completed symbols have a post-build `E`-key color picker. Medium and large variants and electrical power-grid behavior are separate iterations.
+Each symbol uses the standard SonsSdk placement and crafting flow, costs exactly one Wire (item 418) and one Light Bulb (item 635), and can be mounted on a wall. Completed symbols have a post-build `E`-key color picker.
 
 ## Multiplayer through SOTFSDK
 
-The host and every client must use exactly the same 0.3.1 DLL and asset bundle. Apply is host-authoritative: a client requests a color change, then the host validates it, applies the accepted color, and broadcasts that state. Current clients receive each accepted color, while late joiners request a snapshot of the current color state.
-
-Multiplayer persistence is host-only. Restore uses the native `ScrewStructure` first; only when a saved letter is missing its native identity may the host use one Bolt fallback spawn. Single Player placement, color editing, and persistence remain available.
-
-Dedicated-server compatibility is not runtime-certified. Real two-peer multiplayer acceptance and save/reload acceptance are still pending and must not be treated as tested.
+The host and every client must use the same mod version and asset bundle. The host synchronizes accepted color changes and placed-symbol state with connected players.
 
 ## Local setup
 
