@@ -15,7 +15,7 @@ public class SOTFNeonLetters : SonsMod
         //OnGUICallback = MyGUIMethod;
 
         // Uncomment this to automatically apply harmony patches in your assembly.
-        //HarmonyPatchAll = true;
+        HarmonyPatchAll = true;
 }
     protected override void OnInitializeMod()
     {

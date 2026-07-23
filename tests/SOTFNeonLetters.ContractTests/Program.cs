@@ -8,6 +8,7 @@ var failures = new List<string>();
 CheckAssetContract();
 CheckExtensionSourceContract();
 CheckCraftingContract();
+CheckDismantleRefundContract();
 CheckWallPlacementContract();
 CheckColliderContract();
 CheckRuntimeColliderPolicyContract();
@@ -176,6 +177,54 @@ void CheckCraftingContract()
         },
         NeonLetterASmallDefinition.Ingredients,
         "Small A requires one wire followed by one light bulb");
+}
+
+void CheckDismantleRefundContract()
+{
+    CheckSequence(
+        new[] { 418, 635 },
+        NeonLetterDismantleRefundPolicy.ResolveItemIds(
+            NeonLetterASmallDefinition.RecipeId),
+        "dismantling Small A returns the wire and light bulb invested in its recipe");
+    CheckEqual(
+        true,
+        NeonLetterDismantleRefundPolicy.ShouldSpawnRefund(
+            isMultiplayer: false,
+            isServer: false),
+        "single-player dismantling spawns the letter refund");
+    CheckEqual(
+        true,
+        NeonLetterDismantleRefundPolicy.ShouldSpawnRefund(
+            isMultiplayer: true,
+            isServer: true),
+        "the multiplayer host spawns the letter refund once");
+    CheckEqual(
+        false,
+        NeonLetterDismantleRefundPolicy.ShouldSpawnRefund(
+            isMultiplayer: true,
+            isServer: false),
+        "a multiplayer client never duplicates the letter refund");
+    CheckSequence(
+        Array.Empty<int>(),
+        NeonLetterDismantleRefundPolicy.ResolveItemIds(int.MinValue),
+        "unrelated structures never receive a neon-letter refund");
+
+    string? runtimePath = FindRepositoryFile("NeonLetterDismantleRuntime.cs");
+    CheckEqual(false, runtimePath == null, "dismantling uses a dedicated runtime hook");
+    if (runtimePath == null)
+    {
+        return;
+    }
+
+    string runtimeSource = File.ReadAllText(runtimePath);
+    CheckEqual(
+        true,
+        runtimeSource.Contains("RegisterDismantled", StringComparison.Ordinal),
+        "refund hook targets only the native dismantle lifecycle");
+    CheckEqual(
+        true,
+        runtimeSource.Contains("SpawnItemsWorker", StringComparison.Ordinal),
+        "refund hook uses the game's item drop routine");
 }
 
 void CheckWallPlacementContract()

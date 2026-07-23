@@ -38,6 +38,8 @@
                  Link="NeonLetterColorPersistencePolicy.cs" />
         <Compile Include="../../NeonLetterRuntimePolicy.cs"
                  Link="NeonLetterRuntimePolicy.cs" />
+        <Compile Include="../../NeonLetterDismantleRefundPolicy.cs"
+                 Link="NeonLetterDismantleRefundPolicy.cs" />
         <Compile Include="../../NeonSymbolManifest.cs"
                  Link="NeonSymbolManifest.cs" />
         <Compile Include="../../NeonLetterSmallCatalog.cs"

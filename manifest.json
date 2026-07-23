@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/ToniMacaroni/RedLoader/main/MetadataSchema.json",
   "id": "SOTFNeonLetters",
   "author": "AlbatrossoMods",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Buildable small neon symbols: English A-Z, Cyrillic А-Я (including Ё), digits 0-9, and punctuation.",
   "gameVersion": "1.0.0",
   "type": "Mod",

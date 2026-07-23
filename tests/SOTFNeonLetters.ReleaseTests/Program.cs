@@ -57,16 +57,16 @@ void CheckReleaseAssemblyMetadata()
     }
 
     Version? assemblyVersion = AssemblyName.GetAssemblyName(releaseDllPath).Version;
-    CheckEqual(new Version(0, 3, 0, 0), assemblyVersion, "assembly version is 0.3.0.0");
+    CheckEqual(new Version(0, 3, 1, 0), assemblyVersion, "assembly version is 0.3.1.0");
 
     FileVersionInfo fileVersion = FileVersionInfo.GetVersionInfo(releaseDllPath);
-    CheckEqual("0.3.0.0", fileVersion.FileVersion, "file version is 0.3.0.0");
+    CheckEqual("0.3.1.0", fileVersion.FileVersion, "file version is 0.3.1.0");
 
     Assembly releaseAssembly = Assembly.LoadFile(releaseDllPath);
     string? informationalVersion = releaseAssembly
         .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
         ?.InformationalVersion;
-    CheckEqual("0.3.0", informationalVersion, "informational version is 0.3.0");
+    CheckEqual("0.3.1", informationalVersion, "informational version is 0.3.1");
 }
 
 void CheckReleaseAssemblyPaths()
@@ -105,7 +105,7 @@ void CheckManifest()
 
     using JsonDocument manifest = JsonDocument.Parse(manifestBytes);
     JsonElement root = manifest.RootElement;
-    CheckEqual("0.3.0", root.GetProperty("version").GetString(), "manifest version is 0.3.0");
+    CheckEqual("0.3.1", root.GetProperty("version").GetString(), "manifest version is 0.3.1");
     CheckEqual(
         "Buildable small neon symbols: English A-Z, Cyrillic А-Я (including Ё), digits 0-9, and punctuation.",
         root.GetProperty("description").GetString(),
