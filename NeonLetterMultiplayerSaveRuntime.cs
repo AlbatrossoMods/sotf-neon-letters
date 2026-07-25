@@ -11,13 +11,37 @@ namespace SOTFNeonLetters;
 internal sealed class NeonLetterMultiplayerSaveRuntime
     : ICustomSaveable<NeonLetterMultiplayerSaveEnvelope>
 {
+    private const int MaxRestoreItemsPerTick = 16;
+    private const int MaxFallbackSpawnsPerTick = 2;
     private static readonly NeonLetterMultiplayerSaveRuntime Instance = new();
+    private static readonly NeonLetterLifecycleCoordinator Lifecycle = new();
+    private static readonly Func<
+        NeonLetterMultiplayerSaveEntry,
+        BoltEntity,
+        bool> ApplyRestoredColorCallback = ApplyRestoredColor;
+    private static readonly Action<
+        NeonLetterMultiplayerSaveEntry,
+        Exception> LogRestoreErrorCallback = LogRestoreError;
     private static bool _initialized;
 
     private readonly NeonLetterMultiplayerRestoreCoordinator<BoltEntity>
         _restoreCoordinator = new();
+    private readonly Dictionary<int, StructureRecipe> _processedRecipes = new();
+    private readonly Func<
+        NeonLetterMultiplayerSaveEntry,
+        bool,
+        BoltEntity,
+        NeonLetterMultiplayerRestoreObservation<BoltEntity>> _observeRestore;
+    private readonly Func<NeonLetterMultiplayerSaveEntry, BoltEntity>
+        _startFallback;
     private bool _afterLoadSaveReceived;
     private bool _afterSpawnReceived;
+
+    private NeonLetterMultiplayerSaveRuntime()
+    {
+        _observeRestore = ObserveRestore;
+        _startFallback = StartFallback;
+    }
 
     public string Name => "SOTFNeonLetters.MultiplayerWorld";
     public bool IncludeInPlayerSave => false;
@@ -29,12 +53,48 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             return;
         }
 
-        SdkEvents.AfterLoadSave.Subscribe(Instance.OnAfterLoadSave);
-        SdkEvents.OnAfterSpawn.Subscribe(Instance.OnAfterSpawn);
-        SdkEvents.OnInWorldUpdate.Subscribe(Instance.OnInWorldUpdate);
-        SdkEvents.OnWorldExited.Subscribe(Instance.OnWorldExited);
-        SonsSaveTools.Register(Instance);
-        _initialized = true;
+        try
+        {
+            SdkEvents.AfterLoadSave.Subscribe(Instance.OnAfterLoadSave);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.AfterLoadSave.Unsubscribe(
+                    Instance.OnAfterLoadSave));
+
+            SdkEvents.OnAfterSpawn.Subscribe(Instance.OnAfterSpawn);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.OnAfterSpawn.Unsubscribe(
+                    Instance.OnAfterSpawn));
+
+            SdkEvents.OnInWorldUpdate.Subscribe(Instance.OnInWorldUpdate);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.OnInWorldUpdate.Unsubscribe(
+                    Instance.OnInWorldUpdate));
+
+            SdkEvents.OnWorldExited.Subscribe(Instance.OnWorldExited);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.OnWorldExited.Unsubscribe(
+                    Instance.OnWorldExited));
+
+            SonsSaveTools.Register(Instance);
+            Lifecycle.CompleteStage(
+                () => SonsSaveTools.Unregister(Instance));
+            _initialized = true;
+        }
+        catch
+        {
+            Deinitialize();
+            throw;
+        }
+    }
+
+    internal static void Deinitialize()
+    {
+        _initialized = false;
+        Lifecycle.Cleanup(
+            exception => RLog.Error(
+                $"[SOTFNeonLetters] Multiplayer persistence cleanup failed: " +
+                exception));
+        Instance.OnWorldExited();
     }
 
     public NeonLetterMultiplayerSaveEnvelope Save()
@@ -196,6 +256,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
     private void OnWorldExited()
     {
         _restoreCoordinator.Clear();
+        _processedRecipes.Clear();
         _afterLoadSaveReceived = false;
         _afterSpawnReceived = false;
     }
@@ -236,7 +297,8 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             _restoreCoordinator.SetRole(
                 NeonLetterMultiplayerRestoreRole.Host);
         }
-        if (!_afterLoadSaveReceived ||
+        if (_restoreCoordinator.PendingCount == 0 ||
+            !_afterLoadSaveReceived ||
             !_afterSpawnReceived ||
             !ScrewStructureManager.TryGetInstance(
                 out ScrewStructureManager manager) ||
@@ -246,12 +308,15 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             return;
         }
 
+        RefreshProcessedRecipes();
         _restoreCoordinator.Advance(
             Time.realtimeSinceStartupAsDouble,
-            ObserveRestore,
-            StartFallback,
-            ApplyRestoredColor,
-            LogRestoreError);
+            MaxRestoreItemsPerTick,
+            MaxFallbackSpawnsPerTick,
+            _observeRestore,
+            _startFallback,
+            ApplyRestoredColorCallback,
+            LogRestoreErrorCallback);
     }
 
     private void ResolveKnownNetworkRole()
@@ -275,7 +340,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         }
     }
 
-    private static NeonLetterMultiplayerRestoreObservation<BoltEntity>
+    private NeonLetterMultiplayerRestoreObservation<BoltEntity>
         ObserveRestore(
             NeonLetterMultiplayerSaveEntry entry,
             bool fallbackSpawnStarted,
@@ -388,7 +453,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             recipeId);
     }
 
-    private static BoltEntity StartFallback(
+    private BoltEntity StartFallback(
         NeonLetterMultiplayerSaveEntry entry)
     {
         StructureRecipe processedRecipe = ResolveProcessedRecipe(entry.RecipeId);
@@ -459,10 +524,26 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             color);
     }
 
-    private static StructureRecipe ResolveProcessedRecipe(int recipeId)
+    private void RefreshProcessedRecipes()
     {
-        return CustomBlueprintManager.GetProcessedRecipes().FirstOrDefault(
-            candidate => candidate != null && candidate.Id == recipeId);
+        _processedRecipes.Clear();
+        foreach (StructureRecipe recipe in
+                 CustomBlueprintManager.GetProcessedRecipes())
+        {
+            if (recipe != null && !_processedRecipes.ContainsKey(recipe.Id))
+            {
+                _processedRecipes.Add(recipe.Id, recipe);
+            }
+        }
+    }
+
+    private StructureRecipe ResolveProcessedRecipe(int recipeId)
+    {
+        return _processedRecipes.TryGetValue(
+            recipeId,
+            out StructureRecipe recipe)
+                ? recipe
+                : null;
     }
 
     private static void LogRestoreError(

@@ -111,6 +111,147 @@ public interface IRuntimeMaterialFactory
     IRuntimeMaterialHandle Create();
 }
 
+public interface IRuntimeMaterialOwner
+{
+    void Release(IRuntimeMaterialHandle material);
+}
+
+internal sealed class RuntimeMaterialCatalogEntry
+{
+    public RuntimeMaterialCatalogEntry(
+        string prefabName,
+        IReadOnlyList<IRuntimeRendererHandle> renderers,
+        Action? validateAssignments = null)
+    {
+        PrefabName = prefabName;
+        Renderers = renderers;
+        ValidateAssignments = validateAssignments;
+    }
+
+    public string PrefabName { get; }
+    public IReadOnlyList<IRuntimeRendererHandle> Renderers { get; }
+    public Action? ValidateAssignments { get; }
+}
+
+internal sealed class RuntimeMaterialCatalogTransaction
+{
+    private readonly Func<IRuntimeMaterialFactory> _materialFactoryResolver;
+    private readonly IReadOnlyList<RuntimeMaterialCatalogEntry> _entries;
+    private IRuntimeMaterialFactory? _materialFactory;
+    private RuntimeMaterialReplacementLease? _lease;
+
+    public RuntimeMaterialCatalogTransaction(
+        Func<IRuntimeMaterialFactory> materialFactoryResolver,
+        IReadOnlyList<RuntimeMaterialCatalogEntry> entries)
+    {
+        ArgumentNullException.ThrowIfNull(materialFactoryResolver);
+        ArgumentNullException.ThrowIfNull(entries);
+        _materialFactoryResolver = materialFactoryResolver;
+        _entries = entries;
+    }
+
+    public RuntimeMaterialReplacementLease Execute()
+    {
+        if (_lease != null && !_lease.IsRolledBack)
+        {
+            return _lease;
+        }
+
+        _materialFactory ??= _materialFactoryResolver()
+            ?? throw new InvalidOperationException(
+                "The runtime material factory resolver returned no factory.");
+        _lease = RuntimeMaterialReplacement.PrepareAndAssign(
+            _entries,
+            _materialFactory);
+        return _lease;
+    }
+}
+
+internal sealed class RuntimeMaterialReplacementLease
+{
+    private readonly IReadOnlyList<RuntimeMaterialAssignment> _assignments;
+    private readonly IReadOnlyList<IRuntimeMaterialHandle> _ownedMaterials;
+    private readonly IRuntimeMaterialOwner? _owner;
+    private bool _retained;
+
+    internal RuntimeMaterialReplacementLease(
+        IReadOnlyList<RuntimeMaterialAssignment> assignments,
+        IReadOnlyList<IRuntimeMaterialHandle> ownedMaterials,
+        IRuntimeMaterialOwner? owner)
+    {
+        _assignments = assignments;
+        _ownedMaterials = ownedMaterials;
+        _owner = owner;
+    }
+
+    internal bool IsRolledBack { get; private set; }
+
+    public void Retain()
+    {
+        if (IsRolledBack)
+        {
+            throw new InvalidOperationException(
+                "Rolled-back runtime materials cannot be retained.");
+        }
+
+        _retained = true;
+    }
+
+    public void Rollback()
+    {
+        if (_retained || IsRolledBack)
+        {
+            return;
+        }
+
+        IsRolledBack = true;
+        List<Exception>? cleanupExceptions = null;
+        for (int assignmentIndex = _assignments.Count - 1;
+             assignmentIndex >= 0;
+             assignmentIndex--)
+        {
+            RuntimeMaterialAssignment assignment = _assignments[assignmentIndex];
+            try
+            {
+                assignment.Renderer.SetMaterials(assignment.OriginalMaterials);
+            }
+            catch (Exception exception)
+            {
+                (cleanupExceptions ??= new List<Exception>()).Add(exception);
+            }
+        }
+
+        if (_owner != null)
+        {
+            for (int materialIndex = _ownedMaterials.Count - 1;
+                 materialIndex >= 0;
+                 materialIndex--)
+            {
+                try
+                {
+                    _owner.Release(_ownedMaterials[materialIndex]);
+                }
+                catch (Exception exception)
+                {
+                    (cleanupExceptions ??= new List<Exception>()).Add(exception);
+                }
+            }
+        }
+
+        if (cleanupExceptions != null)
+        {
+            throw new AggregateException(
+                "Runtime material rollback did not complete cleanly.",
+                cleanupExceptions);
+        }
+    }
+}
+
+internal sealed record RuntimeMaterialAssignment(
+    IRuntimeRendererHandle Renderer,
+    IReadOnlyList<IRuntimeMaterialHandle> OriginalMaterials,
+    IReadOnlyList<IRuntimeMaterialHandle> RuntimeMaterials);
+
 public static class RuntimeMaterialReplacement
 {
     public static void ReplaceAll(
@@ -125,74 +266,228 @@ public static class RuntimeMaterialReplacement
         ArgumentNullException.ThrowIfNull(renderers);
         ArgumentNullException.ThrowIfNull(materialFactory);
 
+        var transaction = new RuntimeMaterialCatalogTransaction(
+            () => materialFactory,
+            new[]
+            {
+                new RuntimeMaterialCatalogEntry(prefabName, renderers)
+            });
+        RuntimeMaterialReplacementLease lease = transaction.Execute();
+        lease.Retain();
+    }
+
+    internal static RuntimeMaterialReplacementLease PrepareAndAssign(
+        IReadOnlyList<RuntimeMaterialCatalogEntry> entries,
+        IRuntimeMaterialFactory materialFactory)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        ArgumentNullException.ThrowIfNull(materialFactory);
+
         if (!materialFactory.IsShaderSupported)
         {
             throw new InvalidOperationException(
                 $"The game shader '{materialFactory.ShaderName}' is unavailable or unsupported; " +
-                $"cannot replace stripped shaders in prefab '{prefabName}'.");
+                "cannot replace stripped shaders in the neon symbol catalog.");
         }
 
-        if (renderers.Count == 0)
+        if (entries.Count == 0)
         {
             throw new InvalidOperationException(
-                $"Prefab '{prefabName}' has no renderers whose bundle shaders can be replaced.");
+                "The neon symbol catalog has no prefabs whose bundle shaders can be replaced.");
         }
 
-        foreach (IRuntimeRendererHandle renderer in renderers)
+        var sourceAssignments = new List<RuntimeMaterialAssignment>();
+        foreach (RuntimeMaterialCatalogEntry entry in entries)
         {
-            IReadOnlyList<IRuntimeMaterialHandle> sourceMaterials = renderer.Materials;
-            if (sourceMaterials == null || sourceMaterials.Count == 0)
+            if (entry == null)
             {
                 throw new InvalidOperationException(
-                    $"Renderer '{renderer.Name}' in prefab '{prefabName}' has no source materials.");
+                    "The neon symbol catalog contains a null material entry.");
             }
 
-            var runtimeMaterials = new IRuntimeMaterialHandle[sourceMaterials.Count];
-            for (int materialIndex = 0; materialIndex < sourceMaterials.Count; materialIndex++)
-            {
-                IRuntimeMaterialHandle sourceMaterial = sourceMaterials[materialIndex];
-                if (sourceMaterial == null)
-                {
-                    throw new InvalidOperationException(
-                        $"Renderer '{renderer.Name}' in prefab '{prefabName}' has a null " +
-                        $"material at index {materialIndex}.");
-                }
-
-                IRuntimeMaterialHandle runtimeMaterial = materialFactory.Create();
-                runtimeMaterial.CopyPropertiesFrom(sourceMaterial);
-                runtimeMaterial.Name = $"{sourceMaterial.Name}_Runtime";
-                runtimeMaterial.ShaderKeywords = sourceMaterial.ShaderKeywords;
-                runtimeMaterial.RenderQueue = sourceMaterial.RenderQueue;
-                runtimeMaterials[materialIndex] = runtimeMaterial;
-            }
-
-            renderer.SetMaterials(runtimeMaterials);
-
-            IReadOnlyList<IRuntimeMaterialHandle> assignedMaterials = renderer.Materials;
-            if (assignedMaterials == null || assignedMaterials.Count != runtimeMaterials.Length)
+            if (string.IsNullOrWhiteSpace(entry.PrefabName))
             {
                 throw new InvalidOperationException(
-                    $"Renderer '{renderer.Name}' in prefab '{prefabName}' did not retain all " +
-                    "runtime material assignments.");
+                    "Every runtime material catalog entry requires a prefab name.");
             }
 
-            for (int materialIndex = 0; materialIndex < assignedMaterials.Count; materialIndex++)
+            if (entry.Renderers == null || entry.Renderers.Count == 0)
             {
-                IRuntimeMaterialHandle assigned = assignedMaterials[materialIndex];
-                IRuntimeMaterialHandle expected = runtimeMaterials[materialIndex];
-                if (assigned == null ||
-                    !string.Equals(
-                        assigned.ShaderName,
-                        materialFactory.ShaderName,
-                        StringComparison.Ordinal) ||
-                    !string.Equals(assigned.Name, expected.Name, StringComparison.Ordinal) ||
-                    assigned.RenderQueue != expected.RenderQueue)
+                throw new InvalidOperationException(
+                    $"Prefab '{entry.PrefabName}' has no renderers whose bundle shaders can be " +
+                    "replaced.");
+            }
+
+            foreach (IRuntimeRendererHandle renderer in entry.Renderers)
+            {
+                if (renderer == null)
                 {
                     throw new InvalidOperationException(
-                        $"Renderer '{renderer.Name}' in prefab '{prefabName}' did not retain " +
-                        $"runtime material slot {materialIndex} with shader " +
-                        $"'{materialFactory.ShaderName}'.");
+                        $"Prefab '{entry.PrefabName}' contains a null renderer.");
                 }
+
+                IReadOnlyList<IRuntimeMaterialHandle> sourceMaterials = renderer.Materials;
+                if (sourceMaterials == null || sourceMaterials.Count == 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Renderer '{renderer.Name}' in prefab '{entry.PrefabName}' has no source " +
+                        "materials.");
+                }
+
+                var originalMaterials = sourceMaterials.ToArray();
+                for (int materialIndex = 0;
+                     materialIndex < originalMaterials.Length;
+                     materialIndex++)
+                {
+                    if (originalMaterials[materialIndex] == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Renderer '{renderer.Name}' in prefab '{entry.PrefabName}' has a null " +
+                            $"material at index {materialIndex}.");
+                    }
+                }
+
+                sourceAssignments.Add(
+                    new RuntimeMaterialAssignment(
+                        renderer,
+                        originalMaterials,
+                        Array.Empty<IRuntimeMaterialHandle>()));
+            }
+        }
+
+        var ownedMaterials = new List<IRuntimeMaterialHandle>();
+        var preparedAssignments =
+            new List<RuntimeMaterialAssignment>(sourceAssignments.Count);
+        var committedAssignments =
+            new List<RuntimeMaterialAssignment>(sourceAssignments.Count);
+        var lease = new RuntimeMaterialReplacementLease(
+            committedAssignments,
+            ownedMaterials,
+            materialFactory as IRuntimeMaterialOwner);
+        try
+        {
+            foreach (RuntimeMaterialAssignment sourceAssignment in sourceAssignments)
+            {
+                IReadOnlyList<IRuntimeMaterialHandle> sourceMaterials =
+                    sourceAssignment.OriginalMaterials;
+                var runtimeMaterials =
+                    new IRuntimeMaterialHandle[sourceMaterials.Count];
+                for (int materialIndex = 0;
+                     materialIndex < sourceMaterials.Count;
+                     materialIndex++)
+                {
+                    IRuntimeMaterialHandle sourceMaterial = sourceMaterials[materialIndex];
+                    IRuntimeMaterialHandle runtimeMaterial = materialFactory.Create()
+                        ?? throw new InvalidOperationException(
+                            "The runtime material factory returned a null material.");
+                    ownedMaterials.Add(runtimeMaterial);
+                    runtimeMaterial.CopyPropertiesFrom(sourceMaterial);
+                    runtimeMaterial.Name = $"{sourceMaterial.Name}_Runtime";
+                    runtimeMaterial.ShaderKeywords = sourceMaterial.ShaderKeywords;
+                    runtimeMaterial.RenderQueue = sourceMaterial.RenderQueue;
+                    runtimeMaterials[materialIndex] = runtimeMaterial;
+                    ValidatePreparedMaterial(
+                        sourceAssignment.Renderer,
+                        materialIndex,
+                        runtimeMaterial,
+                        sourceMaterial,
+                        materialFactory);
+                }
+
+                preparedAssignments.Add(
+                    sourceAssignment with
+                    {
+                        RuntimeMaterials = runtimeMaterials
+                    });
+            }
+
+            foreach (RuntimeMaterialAssignment assignment in preparedAssignments)
+            {
+                committedAssignments.Add(assignment);
+                assignment.Renderer.SetMaterials(assignment.RuntimeMaterials);
+                ValidateAssignedMaterials(assignment, materialFactory);
+            }
+
+            foreach (RuntimeMaterialCatalogEntry entry in entries)
+            {
+                entry.ValidateAssignments?.Invoke();
+            }
+
+            return lease;
+        }
+        catch (Exception exception)
+        {
+            try
+            {
+                lease.Rollback();
+            }
+            catch (Exception rollbackException)
+            {
+                throw new AggregateException(exception, rollbackException);
+            }
+
+            throw;
+        }
+    }
+
+    private static void ValidatePreparedMaterial(
+        IRuntimeRendererHandle renderer,
+        int materialIndex,
+        IRuntimeMaterialHandle runtimeMaterial,
+        IRuntimeMaterialHandle sourceMaterial,
+        IRuntimeMaterialFactory materialFactory)
+    {
+        if (!string.Equals(
+                runtimeMaterial.ShaderName,
+                materialFactory.ShaderName,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                runtimeMaterial.Name,
+                $"{sourceMaterial.Name}_Runtime",
+                StringComparison.Ordinal) ||
+            runtimeMaterial.RenderQueue != sourceMaterial.RenderQueue)
+        {
+            throw new InvalidOperationException(
+                $"Renderer '{renderer.Name}' did not prepare runtime material slot " +
+                $"{materialIndex} with shader '{materialFactory.ShaderName}'.");
+        }
+    }
+
+    private static void ValidateAssignedMaterials(
+        RuntimeMaterialAssignment assignment,
+        IRuntimeMaterialFactory materialFactory)
+    {
+        IReadOnlyList<IRuntimeMaterialHandle> assignedMaterials =
+            assignment.Renderer.Materials;
+        if (assignedMaterials == null ||
+            assignedMaterials.Count != assignment.RuntimeMaterials.Count)
+        {
+            throw new InvalidOperationException(
+                $"Renderer '{assignment.Renderer.Name}' did not retain all runtime material " +
+                "assignments.");
+        }
+
+        for (int materialIndex = 0;
+             materialIndex < assignedMaterials.Count;
+             materialIndex++)
+        {
+            IRuntimeMaterialHandle assigned = assignedMaterials[materialIndex];
+            IRuntimeMaterialHandle expected =
+                assignment.RuntimeMaterials[materialIndex];
+            if (assigned == null ||
+                !string.Equals(
+                    assigned.ShaderName,
+                    materialFactory.ShaderName,
+                    StringComparison.Ordinal) ||
+                !string.Equals(
+                    assigned.Name,
+                    expected.Name,
+                    StringComparison.Ordinal) ||
+                assigned.RenderQueue != expected.RenderQueue)
+            {
+                throw new InvalidOperationException(
+                    $"Renderer '{assignment.Renderer.Name}' did not retain runtime material " +
+                    $"slot {materialIndex} with shader '{materialFactory.ShaderName}'.");
             }
         }
     }
@@ -216,6 +511,18 @@ public interface IBookPageRegistrationTarget<TRecipe, TTexture>
         TRecipe? bottomRecipe,
         TTexture background,
         string titleLocalizationKey);
+}
+
+public interface ITransactionalBookPageRegistrationTarget<TRecipe, TTexture> :
+    IBookPageRegistrationTarget<TRecipe, TTexture>
+    where TRecipe : class
+    where TTexture : class
+{
+    object CaptureRegistrationState(
+        string titleLocalizationKey,
+        TRecipe topRecipe,
+        TRecipe? bottomRecipe);
+    void RestoreRegistrationState(object snapshot);
 }
 
 public sealed class ReadyAlphabetBookPage<TRecipe>
@@ -306,6 +613,199 @@ public sealed class AlphabetBookPageCoordinator<TRecipe>
         _recipesBySymbol.Clear();
         _completedPageIndexes.Clear();
     }
+
+    internal AlphabetBookPageCoordinatorSnapshot<TRecipe> CaptureSnapshot()
+    {
+        return new AlphabetBookPageCoordinatorSnapshot<TRecipe>(
+            new Dictionary<char, TRecipe>(_recipesBySymbol),
+            new HashSet<int>(_completedPageIndexes));
+    }
+
+    internal AlphabetBookPageCoordinatorPlan<TRecipe> PrepareAdd(
+        NeonLetterSmallDefinition definition,
+        TRecipe recipe)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+        ArgumentNullException.ThrowIfNull(recipe);
+        AlphabetBookPageCoordinatorSnapshot<TRecipe> originalSnapshot =
+            CaptureSnapshot();
+        var preparedCoordinator =
+            new AlphabetBookPageCoordinator<TRecipe>();
+        preparedCoordinator.Restore(originalSnapshot);
+        ReadyAlphabetBookPage<TRecipe>? readyPage =
+            preparedCoordinator.Add(definition, recipe);
+        AlphabetBookPageCoordinatorSnapshot<TRecipe> addedRecipeSnapshot =
+            preparedCoordinator.CaptureSnapshot();
+        var readyPages = new List<ReadyAlphabetBookPage<TRecipe>>();
+        while (readyPage != null)
+        {
+            readyPages.Add(readyPage);
+            preparedCoordinator.MarkCompleted(readyPage.PageIndex);
+            readyPage = preparedCoordinator.GetNextReadyPage();
+        }
+
+        return new AlphabetBookPageCoordinatorPlan<TRecipe>(
+            originalSnapshot,
+            addedRecipeSnapshot,
+            readyPages);
+    }
+
+    internal void Restore(AlphabetBookPageCoordinatorSnapshot<TRecipe> snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        _recipesBySymbol.Clear();
+        foreach ((char symbol, TRecipe recipe) in snapshot.RecipesBySymbol)
+        {
+            _recipesBySymbol.Add(symbol, recipe);
+        }
+
+        _completedPageIndexes.Clear();
+        foreach (int pageIndex in snapshot.CompletedPageIndexes)
+        {
+            _completedPageIndexes.Add(pageIndex);
+        }
+    }
+}
+
+internal sealed class AlphabetBookPageCoordinatorSnapshot<TRecipe>
+    where TRecipe : class
+{
+    public AlphabetBookPageCoordinatorSnapshot(
+        IReadOnlyDictionary<char, TRecipe> recipesBySymbol,
+        IReadOnlySet<int> completedPageIndexes)
+    {
+        RecipesBySymbol = recipesBySymbol;
+        CompletedPageIndexes = completedPageIndexes;
+    }
+
+    public IReadOnlyDictionary<char, TRecipe> RecipesBySymbol { get; }
+    public IReadOnlySet<int> CompletedPageIndexes { get; }
+}
+
+internal sealed class AlphabetBookPageCoordinatorPlan<TRecipe>
+    where TRecipe : class
+{
+    public AlphabetBookPageCoordinatorPlan(
+        AlphabetBookPageCoordinatorSnapshot<TRecipe> originalSnapshot,
+        AlphabetBookPageCoordinatorSnapshot<TRecipe> addedRecipeSnapshot,
+        IReadOnlyList<ReadyAlphabetBookPage<TRecipe>> readyPages)
+    {
+        OriginalSnapshot = originalSnapshot;
+        AddedRecipeSnapshot = addedRecipeSnapshot;
+        ReadyPages = readyPages;
+    }
+
+    public AlphabetBookPageCoordinatorSnapshot<TRecipe> OriginalSnapshot { get; }
+    public AlphabetBookPageCoordinatorSnapshot<TRecipe> AddedRecipeSnapshot { get; }
+    public IReadOnlyList<ReadyAlphabetBookPage<TRecipe>> ReadyPages { get; }
+}
+
+internal sealed class NeonLetterCallbackTransaction
+{
+    private readonly Stack<Action> _rollbacks = new();
+
+    public static void Execute(Action<NeonLetterCallbackTransaction> callback)
+    {
+        ArgumentNullException.ThrowIfNull(callback);
+        var transaction = new NeonLetterCallbackTransaction();
+        try
+        {
+            callback(transaction);
+        }
+        catch (Exception exception)
+        {
+            try
+            {
+                transaction.Rollback();
+            }
+            catch (Exception rollbackException)
+            {
+                throw new AggregateException(exception, rollbackException);
+            }
+
+            throw;
+        }
+    }
+
+    public static void Execute(
+        Action<NeonLetterCallbackTransaction> callback,
+        Action finalCommit,
+        Action cancelFinalCommit)
+    {
+        ArgumentNullException.ThrowIfNull(callback);
+        ArgumentNullException.ThrowIfNull(finalCommit);
+        ArgumentNullException.ThrowIfNull(cancelFinalCommit);
+        var transaction = new NeonLetterCallbackTransaction();
+        try
+        {
+            callback(transaction);
+            finalCommit();
+        }
+        catch (Exception exception)
+        {
+            List<Exception>? rollbackExceptions = null;
+            try
+            {
+                cancelFinalCommit();
+            }
+            catch (Exception cancelException)
+            {
+                (rollbackExceptions ??= new List<Exception>()).Add(
+                    cancelException);
+            }
+
+            try
+            {
+                transaction.Rollback();
+            }
+            catch (Exception rollbackException)
+            {
+                (rollbackExceptions ??= new List<Exception>()).Add(
+                    rollbackException);
+            }
+
+            if (rollbackExceptions != null)
+            {
+                rollbackExceptions.Insert(0, exception);
+                throw new AggregateException(
+                    "Blueprint callback and rollback did not complete cleanly.",
+                    rollbackExceptions);
+            }
+
+            throw;
+        }
+    }
+
+    public void Apply(Action mutation, Action rollback)
+    {
+        ArgumentNullException.ThrowIfNull(mutation);
+        ArgumentNullException.ThrowIfNull(rollback);
+        _rollbacks.Push(rollback);
+        mutation();
+    }
+
+    private void Rollback()
+    {
+        List<Exception>? rollbackExceptions = null;
+        while (_rollbacks.TryPop(out Action? rollback))
+        {
+            try
+            {
+                rollback();
+            }
+            catch (Exception exception)
+            {
+                (rollbackExceptions ??= new List<Exception>()).Add(exception);
+            }
+        }
+
+        if (rollbackExceptions != null)
+        {
+            throw new AggregateException(
+                "Blueprint callback rollback did not complete cleanly.",
+                rollbackExceptions);
+        }
+    }
 }
 
 public static class BookPageRegistrar
@@ -336,6 +836,66 @@ public static class BookPageRegistrar
                 nameof(bottomRecipeTitle));
         }
 
+        if (target is
+            ITransactionalBookPageRegistrationTarget<TRecipe, TTexture>
+            transactionalTarget)
+        {
+            object snapshot = transactionalTarget.CaptureRegistrationState(
+                titleLocalizationKey,
+                topRecipe,
+                bottomRecipe);
+            try
+            {
+                RegisterCore(
+                    titleLocalizationKey,
+                    title,
+                    topRecipe,
+                    topRecipeTitle,
+                    bottomRecipe,
+                    bottomRecipeTitle,
+                    background,
+                    target);
+            }
+            catch (Exception exception)
+            {
+                try
+                {
+                    transactionalTarget.RestoreRegistrationState(snapshot);
+                }
+                catch (Exception rollbackException)
+                {
+                    throw new AggregateException(exception, rollbackException);
+                }
+
+                throw;
+            }
+
+            return;
+        }
+
+        RegisterCore(
+            titleLocalizationKey,
+            title,
+            topRecipe,
+            topRecipeTitle,
+            bottomRecipe,
+            bottomRecipeTitle,
+            background,
+            target);
+    }
+
+    private static void RegisterCore<TRecipe, TTexture>(
+        string titleLocalizationKey,
+        string title,
+        TRecipe topRecipe,
+        string topRecipeTitle,
+        TRecipe? bottomRecipe,
+        string? bottomRecipeTitle,
+        TTexture background,
+        IBookPageRegistrationTarget<TRecipe, TTexture> target)
+        where TRecipe : class
+        where TTexture : class
+    {
         bool matchingPageAlreadyExists = target.LastPageMatches(
             topRecipe,
             bottomRecipe,

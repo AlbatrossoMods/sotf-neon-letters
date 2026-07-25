@@ -5,6 +5,7 @@
   "version": "0.3.1",
   "description": "Buildable small neon symbols: English A-Z, Cyrillic А-Я (including Ё), digits 0-9, and punctuation.",
   "gameVersion": "1.0.0",
+  "loaderVersion": "0.8.6",
   "type": "Mod",
   "url": "https://github.com/AlbatrossoMods/sotf-neon-letters"
 }

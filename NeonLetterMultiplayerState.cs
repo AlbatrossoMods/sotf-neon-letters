@@ -6,6 +6,20 @@ public readonly record struct NeonLetterColorAcceptance(
     bool Accepted,
     NeonRgba AuthoritativeColor);
 
+internal delegate bool NeonLetterPendingReadyCallback<TState, TKey>(
+    ref TState state,
+    TKey identity);
+
+internal delegate void NeonLetterPendingApplyCallback<TState, TKey>(
+    ref TState state,
+    TKey identity,
+    NeonRgba color);
+
+internal delegate void NeonLetterPendingApplyErrorCallback<TState, TKey>(
+    ref TState state,
+    TKey identity,
+    Exception exception);
+
 public sealed class NeonLetterAuthoritativeColors<TKey>
     where TKey : notnull
 {
@@ -66,6 +80,14 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
             : NeonRgba.ProjectCyan;
     }
 
+    /// <summary>
+    /// Removes one authoritative identity; repeated removals have no effect.
+    /// </summary>
+    public void Remove(TKey identity)
+    {
+        _colors.Remove(identity);
+    }
+
     public void Clear()
     {
         _colors.Clear();
@@ -81,10 +103,36 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
 public sealed class NeonLetterPendingColors<TKey>
     where TKey : notnull
 {
+    private static readonly NeonLetterPendingReadyCallback<
+        DirectCallbackState,
+        TKey> DirectIsReady =
+            static (ref DirectCallbackState state, TKey identity) =>
+                state.IsReady(identity);
+    private static readonly NeonLetterPendingApplyCallback<
+        DirectCallbackState,
+        TKey> DirectApply =
+            static (
+                ref DirectCallbackState state,
+                TKey identity,
+                NeonRgba color) =>
+                    state.Apply(identity, color);
+    private static readonly NeonLetterPendingApplyErrorCallback<
+        DirectCallbackState,
+        TKey> DirectOnApplyError =
+            static (
+                ref DirectCallbackState state,
+                TKey identity,
+                Exception exception) =>
+                    state.OnApplyError!(identity, exception);
+
     private readonly int _capacity;
     private readonly double _lifetimeSeconds;
-    private readonly Dictionary<TKey, PendingColor> _colors = new();
-    private long _nextSequence;
+    private readonly Dictionary<TKey, LinkedListNode<PendingColor>> _colors =
+        new();
+    private readonly LinkedList<PendingColor> _pending = new();
+    private readonly NeonLetterReentrantSnapshotPool<TKey> _snapshotPool =
+        new();
+    private LinkedListNode<PendingColor>? _nextPending;
 
     public NeonLetterPendingColors(int capacity, double lifetimeSeconds)
     {
@@ -127,10 +175,20 @@ public sealed class NeonLetterPendingColors<TKey>
             RemoveOldest();
         }
 
-        _colors[identity] = new PendingColor(
+        if (_colors.TryGetValue(
+                identity,
+                out LinkedListNode<PendingColor>? existing))
+        {
+            RemoveNode(existing);
+        }
+
+        var node = new LinkedListNode<PendingColor>(new PendingColor(
+            identity,
             color,
-            expiresAtSeconds,
-            _nextSequence++);
+            expiresAtSeconds));
+        _pending.AddLast(node);
+        _colors.Add(identity, node);
+        _nextPending ??= node;
     }
 
     public int ApplyReady(
@@ -140,33 +198,24 @@ public sealed class NeonLetterPendingColors<TKey>
     {
         ArgumentNullException.ThrowIfNull(isReady);
         ArgumentNullException.ThrowIfNull(apply);
-
         ValidateNowSeconds(nowSeconds);
-        PruneExpired(nowSeconds);
-        TKey[] pendingIdentities = _colors
-            .OrderBy(entry => entry.Value.Sequence)
-            .Select(entry => entry.Key)
-            .ToArray();
-        int appliedCount = 0;
-        foreach (TKey identity in pendingIdentities)
+
+        if (_colors.Count == 0)
         {
-            if (!_colors.TryGetValue(identity, out PendingColor pending) ||
-                !isReady(identity))
-            {
-                continue;
-            }
-
-            apply(identity, pending.Color);
-            if (_colors.TryGetValue(identity, out PendingColor current) &&
-                current.Sequence == pending.Sequence)
-            {
-                _colors.Remove(identity);
-            }
-
-            appliedCount++;
+            return 0;
         }
 
-        return appliedCount;
+        var callbackState = new DirectCallbackState(
+            isReady,
+            apply,
+            OnApplyError: null);
+        return ApplyReady(
+            nowSeconds,
+            int.MaxValue,
+            ref callbackState,
+            DirectIsReady,
+            DirectApply,
+            onApplyError: null);
     }
 
     public int ApplyReadyContinuing(
@@ -179,38 +228,149 @@ public sealed class NeonLetterPendingColors<TKey>
         ArgumentNullException.ThrowIfNull(apply);
         ArgumentNullException.ThrowIfNull(onApplyError);
 
-        ValidateNowSeconds(nowSeconds);
-        PruneExpired(nowSeconds);
-        TKey[] pendingIdentities = _colors
-            .OrderBy(entry => entry.Value.Sequence)
-            .Select(entry => entry.Key)
-            .ToArray();
-        int appliedCount = 0;
-        foreach (TKey identity in pendingIdentities)
+        return ApplyReadyContinuing(
+            nowSeconds,
+            int.MaxValue,
+            isReady,
+            apply,
+            onApplyError);
+    }
+
+    /// <summary>
+    /// Applies at most the requested pending entries while isolating failures.
+    /// </summary>
+    public int ApplyReadyContinuing(
+        double nowSeconds,
+        int maxItems,
+        Func<TKey, bool> isReady,
+        Action<TKey, NeonRgba> apply,
+        Action<TKey, Exception> onApplyError)
+    {
+        ArgumentNullException.ThrowIfNull(isReady);
+        ArgumentNullException.ThrowIfNull(apply);
+        ArgumentNullException.ThrowIfNull(onApplyError);
+        var callbackState = new DirectCallbackState(
+            isReady,
+            apply,
+            onApplyError);
+        return ApplyReadyContinuing(
+            nowSeconds,
+            maxItems,
+            ref callbackState,
+            DirectIsReady,
+            DirectApply,
+            DirectOnApplyError);
+    }
+
+    internal int ApplyReadyContinuing<TState>(
+        double nowSeconds,
+        int maxItems,
+        ref TState callbackState,
+        NeonLetterPendingReadyCallback<TState, TKey> isReady,
+        NeonLetterPendingApplyCallback<TState, TKey> apply,
+        NeonLetterPendingApplyErrorCallback<TState, TKey>? onApplyError)
+    {
+        if (maxItems < 0)
         {
-            if (!_colors.TryGetValue(identity, out PendingColor pending) ||
-                !isReady(identity))
+            throw new ArgumentOutOfRangeException(
+                nameof(maxItems),
+                maxItems,
+                "Pending color item budget cannot be negative.");
+        }
+
+        ValidateNowSeconds(nowSeconds);
+        if (_colors.Count == 0 || maxItems == 0)
+        {
+            return 0;
+        }
+
+        return ApplyReady(
+            nowSeconds,
+            maxItems,
+            ref callbackState,
+            isReady,
+            apply,
+            onApplyError);
+    }
+
+    private int ApplyReady<TState>(
+        double nowSeconds,
+        int maxItems,
+        ref TState callbackState,
+        NeonLetterPendingReadyCallback<TState, TKey> isReady,
+        NeonLetterPendingApplyCallback<TState, TKey> apply,
+        NeonLetterPendingApplyErrorCallback<TState, TKey>? onApplyError)
+    {
+        PruneExpired(nowSeconds);
+        if (_colors.Count == 0)
+        {
+            return 0;
+        }
+
+        LinkedListNode<PendingColor>? node =
+            _nextPending?.List == _pending
+                ? _nextPending
+                : _pending.First;
+        int nodesToInspect = _pending.Count;
+        List<TKey> snapshot = _snapshotPool.Rent();
+        int appliedCount = 0;
+        try
+        {
+            for (int inspected = 0;
+                 inspected < nodesToInspect &&
+                 snapshot.Count < maxItems &&
+                 node != null;
+                 inspected++)
             {
-                continue;
+                TKey identity = node.Value.Identity;
+                node = node.Next ?? _pending.First;
+                if (!_snapshotPool.IsReservedByOuterBuffer(identity))
+                {
+                    snapshot.Add(identity);
+                }
             }
 
-            try
+            _nextPending = node;
+            foreach (TKey identity in snapshot)
             {
-                apply(identity, pending.Color);
-            }
-            catch (Exception exception)
-            {
-                onApplyError(identity, exception);
-                continue;
-            }
+                if (!_colors.TryGetValue(
+                        identity,
+                        out LinkedListNode<PendingColor>? currentNode) ||
+                    !isReady(ref callbackState, identity))
+                {
+                    continue;
+                }
 
-            if (_colors.TryGetValue(identity, out PendingColor current) &&
-                current.Sequence == pending.Sequence)
-            {
-                _colors.Remove(identity);
-            }
+                PendingColor pending = currentNode.Value;
+                try
+                {
+                    apply(ref callbackState, identity, pending.Color);
+                }
+                catch (Exception exception)
+                {
+                    if (onApplyError == null)
+                    {
+                        throw;
+                    }
 
-            appliedCount++;
+                    onApplyError(
+                        ref callbackState,
+                        identity,
+                        exception);
+                    continue;
+                }
+
+                if (IsCurrent(currentNode, identity))
+                {
+                    RemoveNode(currentNode);
+                }
+
+                appliedCount++;
+            }
+        }
+        finally
+        {
+            _snapshotPool.Return(snapshot);
         }
 
         return appliedCount;
@@ -219,18 +379,39 @@ public sealed class NeonLetterPendingColors<TKey>
     public void Prune(double nowSeconds)
     {
         ValidateNowSeconds(nowSeconds);
+        if (_colors.Count == 0)
+        {
+            return;
+        }
+
         PruneExpired(nowSeconds);
+    }
+
+    /// <summary>
+    /// Removes one pending identity; repeated removals have no effect.
+    /// </summary>
+    public void Remove(TKey identity)
+    {
+        if (_colors.TryGetValue(
+                identity,
+                out LinkedListNode<PendingColor>? node))
+        {
+            RemoveNode(node);
+        }
     }
 
     private void PruneExpired(double nowSeconds)
     {
-        TKey[] expiredIdentities = _colors
-            .Where(entry => nowSeconds >= entry.Value.ExpiresAtSeconds)
-            .Select(entry => entry.Key)
-            .ToArray();
-        foreach (TKey identity in expiredIdentities)
+        LinkedListNode<PendingColor>? node = _pending.First;
+        while (node != null)
         {
-            _colors.Remove(identity);
+            LinkedListNode<PendingColor>? next = node.Next;
+            if (nowSeconds >= node.Value.ExpiresAtSeconds)
+            {
+                RemoveNode(node);
+            }
+
+            node = next;
         }
     }
 
@@ -248,33 +429,101 @@ public sealed class NeonLetterPendingColors<TKey>
     public void Clear()
     {
         _colors.Clear();
+        _pending.Clear();
+        _nextPending = null;
     }
 
     private void RemoveOldest()
     {
-        TKey oldestIdentity = default!;
-        long oldestSequence = long.MaxValue;
-        foreach (KeyValuePair<TKey, PendingColor> entry in _colors)
+        if (_pending.First != null)
         {
-            if (entry.Value.Sequence < oldestSequence)
-            {
-                oldestIdentity = entry.Key;
-                oldestSequence = entry.Value.Sequence;
-            }
+            RemoveNode(_pending.First);
+        }
+    }
+
+    private bool IsCurrent(
+        LinkedListNode<PendingColor> node,
+        TKey identity)
+    {
+        return _colors.TryGetValue(
+                   identity,
+                   out LinkedListNode<PendingColor>? current) &&
+               ReferenceEquals(current, node);
+    }
+
+    private void RemoveNode(LinkedListNode<PendingColor> node)
+    {
+        if (node.List != _pending)
+        {
+            return;
         }
 
-        _colors.Remove(oldestIdentity);
+        LinkedListNode<PendingColor>? next =
+            node.Next ?? _pending.First;
+        if (_colors.TryGetValue(
+                node.Value.Identity,
+                out LinkedListNode<PendingColor>? current) &&
+            ReferenceEquals(current, node))
+        {
+            _colors.Remove(node.Value.Identity);
+        }
+
+        _pending.Remove(node);
+        if (ReferenceEquals(_nextPending, node))
+        {
+            _nextPending = next?.List == _pending
+                ? next
+                : _pending.First;
+        }
     }
 
     private readonly record struct PendingColor(
+        TKey Identity,
         NeonRgba Color,
-        double ExpiresAtSeconds,
-        long Sequence);
+        double ExpiresAtSeconds);
+
+    private readonly record struct DirectCallbackState(
+        Func<TKey, bool> IsReady,
+        Action<TKey, NeonRgba> Apply,
+        Action<TKey, Exception>? OnApplyError);
 }
 
 public sealed class NeonLetterReplicatedColorState<TKey>
     where TKey : notnull
 {
+    private static readonly NeonLetterPendingReadyCallback<
+        DrainCallbackState,
+        TKey> DrainIsReady =
+            static (ref DrainCallbackState state, TKey identity) =>
+                state.IsReady(identity);
+    private static readonly NeonLetterPendingApplyCallback<
+        DrainCallbackState,
+        TKey> DrainApply =
+            static (
+                ref DrainCallbackState state,
+                TKey identity,
+                NeonRgba color) =>
+            {
+                state.Apply(identity, color);
+                state.Owner._resolvedColors.Commit(identity, color);
+            };
+    private static readonly NeonLetterPendingApplyErrorCallback<
+        DrainCallbackState,
+        TKey> DrainOnApplyError =
+            static (
+                ref DrainCallbackState state,
+                TKey identity,
+                Exception exception) =>
+            {
+                if (state.OnApplyError == null)
+                {
+                    state.FirstApplyError ??= exception;
+                    return;
+                }
+
+                state.OnApplyError(identity, exception);
+            };
+
     private readonly NeonLetterSessionColors<TKey> _resolvedColors = new();
     private readonly NeonLetterPendingColors<TKey> _pendingColors;
 
@@ -321,15 +570,24 @@ public sealed class NeonLetterReplicatedColorState<TKey>
         Func<TKey, bool> isReady,
         Action<TKey, NeonRgba> apply)
     {
-        Exception? firstApplyError = null;
-        int appliedCount = DrainReady(
-            nowSeconds,
+        ArgumentNullException.ThrowIfNull(isReady);
+        ArgumentNullException.ThrowIfNull(apply);
+
+        var callbackState = new DrainCallbackState(
+            this,
             isReady,
             apply,
-            (_, exception) => firstApplyError ??= exception);
-        if (firstApplyError != null)
+            onApplyError: null);
+        int appliedCount = _pendingColors.ApplyReadyContinuing(
+            nowSeconds,
+            int.MaxValue,
+            ref callbackState,
+            DrainIsReady,
+            DrainApply,
+            DrainOnApplyError);
+        if (callbackState.FirstApplyError != null)
         {
-            throw firstApplyError;
+            throw callbackState.FirstApplyError;
         }
 
         return appliedCount;
@@ -341,19 +599,40 @@ public sealed class NeonLetterReplicatedColorState<TKey>
         Action<TKey, NeonRgba> apply,
         Action<TKey, Exception> onApplyError)
     {
+        return DrainReady(
+            nowSeconds,
+            int.MaxValue,
+            isReady,
+            apply,
+            onApplyError);
+    }
+
+    /// <summary>
+    /// Drains at most the requested pending identities in one update.
+    /// </summary>
+    public int DrainReady(
+        double nowSeconds,
+        int maxItems,
+        Func<TKey, bool> isReady,
+        Action<TKey, NeonRgba> apply,
+        Action<TKey, Exception> onApplyError)
+    {
         ArgumentNullException.ThrowIfNull(isReady);
         ArgumentNullException.ThrowIfNull(apply);
         ArgumentNullException.ThrowIfNull(onApplyError);
 
+        var callbackState = new DrainCallbackState(
+            this,
+            isReady,
+            apply,
+            onApplyError);
         return _pendingColors.ApplyReadyContinuing(
             nowSeconds,
-            isReady,
-            (identity, color) =>
-            {
-                apply(identity, color);
-                _resolvedColors.Commit(identity, color);
-            },
-            onApplyError);
+            maxItems,
+            ref callbackState,
+            DrainIsReady,
+            DrainApply,
+            DrainOnApplyError);
     }
 
     public NeonRgba Resolve(TKey identity)
@@ -361,9 +640,40 @@ public sealed class NeonLetterReplicatedColorState<TKey>
         return _resolvedColors.Resolve(identity);
     }
 
+    /// <summary>
+    /// Removes one identity from both resolved and pending replicated state.
+    /// </summary>
+    public void Remove(TKey identity)
+    {
+        _resolvedColors.Remove(identity);
+        _pendingColors.Remove(identity);
+    }
+
     public void Clear()
     {
         _resolvedColors.Clear();
         _pendingColors.Clear();
+    }
+
+    private struct DrainCallbackState
+    {
+        public DrainCallbackState(
+            NeonLetterReplicatedColorState<TKey> owner,
+            Func<TKey, bool> isReady,
+            Action<TKey, NeonRgba> apply,
+            Action<TKey, Exception>? onApplyError)
+        {
+            Owner = owner;
+            IsReady = isReady;
+            Apply = apply;
+            OnApplyError = onApplyError;
+            FirstApplyError = null;
+        }
+
+        public NeonLetterReplicatedColorState<TKey> Owner { get; }
+        public Func<TKey, bool> IsReady { get; }
+        public Action<TKey, NeonRgba> Apply { get; }
+        public Action<TKey, Exception>? OnApplyError { get; }
+        public Exception? FirstApplyError { get; set; }
     }
 }

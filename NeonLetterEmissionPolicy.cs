@@ -62,11 +62,7 @@ public static class NeonLetterEmissionPolicy
                 $"Visual subtree '{selectedSubtree.Name}' has no renderers.");
         }
 
-        var preparedWrites = new List<(
-            IEmissionRenderer Renderer,
-            int MaterialIndex,
-            IEmissionPropertyBlock PropertyBlock,
-            NeonRgba Color)>();
+        var slots = new List<IEmissionBindingSlot>();
         foreach (IEmissionRenderer renderer in renderers)
         {
             if (renderer == null)
@@ -92,58 +88,53 @@ public static class NeonLetterEmissionPolicy
                         $"{materialIndex}.");
                 }
 
-                float intensity = material.ReadEmissiveIntensity();
-                if (!float.IsFinite(intensity))
-                {
-                    throw new InvalidOperationException(
-                        $"Renderer '{renderer.Name}' material slot {materialIndex} requires a " +
-                        $"finite positive emissive intensity, but got {intensity}.");
-                }
-
-                if (intensity <= 0f)
-                {
-                    throw new InvalidOperationException(
-                        $"Renderer '{renderer.Name}' material slot {materialIndex} has " +
-                        $"non-positive emissive intensity {intensity}.");
-                }
-
-                NeonRgba emissiveColor = new(
-                    SrgbToLinear(selectedColor.Red) * intensity,
-                    SrgbToLinear(selectedColor.Green) * intensity,
-                    SrgbToLinear(selectedColor.Blue) * intensity,
-                    selectedColor.Alpha);
-                IEmissionPropertyBlock propertyBlock =
-                    renderer.ReadPropertyBlock(materialIndex);
-                if (propertyBlock == null)
-                {
-                    throw new InvalidOperationException(
-                        $"Renderer '{renderer.Name}' has no property block for material slot " +
-                        $"{materialIndex}.");
-                }
-
-                preparedWrites.Add((
-                    renderer,
-                    materialIndex,
-                    propertyBlock,
-                    emissiveColor));
+                slots.Add(
+                    new LegacyEmissionBindingSlot(
+                        renderer,
+                        material,
+                        materialIndex));
             }
         }
 
-        foreach (var preparedWrite in preparedWrites)
-        {
-            preparedWrite.PropertyBlock.SetColor(
-                EmissiveColorPropertyName,
-                preparedWrite.Color);
-            preparedWrite.Renderer.WritePropertyBlock(
-                preparedWrite.MaterialIndex,
-                preparedWrite.PropertyBlock);
-        }
+        new NeonLetterEmissionBinding(slots).Apply(selectedColor);
     }
 
-    private static float SrgbToLinear(float component)
+    private sealed class LegacyEmissionBindingSlot : IEmissionBindingSlot
     {
-        return component <= 0.04045f
-            ? component / 12.92f
-            : MathF.Pow((component + 0.055f) / 1.055f, 2.4f);
+        private readonly IEmissionRenderer _renderer;
+        private readonly IEmissionMaterial _material;
+
+        public LegacyEmissionBindingSlot(
+            IEmissionRenderer renderer,
+            IEmissionMaterial material,
+            int materialIndex)
+        {
+            _renderer = renderer;
+            _material = material;
+            MaterialIndex = materialIndex;
+        }
+
+        public string RendererName => _renderer.Name;
+        public int MaterialIndex { get; }
+        public bool IsRendererAlive => true;
+        public bool IsMaterialAlive => true;
+
+        public float ReadEmissiveIntensity()
+        {
+            return _material.ReadEmissiveIntensity();
+        }
+
+        public IEmissionPropertyBlock ReadPropertyBlock()
+        {
+            return _renderer.ReadPropertyBlock(MaterialIndex);
+        }
+
+        public void WritePropertyBlock(
+            IEmissionPropertyBlock propertyBlock)
+        {
+            _renderer.WritePropertyBlock(
+                MaterialIndex,
+                propertyBlock);
+        }
     }
 }

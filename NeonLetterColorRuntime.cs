@@ -16,6 +16,13 @@ public static class NeonLetterColorRuntime
     private static readonly NeonLetterSessionColors<int> SessionColors = new();
     private static readonly NeonLetterColorSaveState PersistentColors = new();
     private static readonly NeonLetterColorSaveable Saveable = new();
+    private static readonly NeonLetterLifecycleCoordinator Lifecycle = new();
+    private static readonly NeonLetterEmissionBindingCache<
+        GameObject,
+        NeonLetterSmallDefinition,
+        NeonLetterEmissionBinding> EmissionBindings = new(
+            IsStructureRootAlive,
+            CreateEmissionBinding);
     private static bool _initialized;
     private static bool _restoreQueued;
 
@@ -26,17 +33,56 @@ public static class NeonLetterColorRuntime
             return;
         }
 
-        if (!GlobalInput.RegisterKey(KeyCode.E, OnUsePerformed))
+        try
         {
-            RLog.Error(
-                "[SOTFNeonLetters] The E key is already registered; " +
-                "the neon color editor cannot be opened.");
+            if (GlobalInput.RegisterKey(KeyCode.E, OnUsePerformed))
+            {
+                Lifecycle.CompleteStage(
+                    () => GlobalInput.UnregisterKey(KeyCode.E));
+            }
+            else
+            {
+                RLog.Error(
+                    "[SOTFNeonLetters] The E key is already registered; " +
+                    "the neon color editor cannot be opened.");
+            }
+
+            SdkEvents.OnAfterSpawn.Subscribe(QueuePersistentColorRestore);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.OnAfterSpawn.Unsubscribe(
+                    QueuePersistentColorRestore));
+
+            SdkEvents.OnWorldExited.Subscribe(OnWorldExited);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.OnWorldExited.Unsubscribe(OnWorldExited));
+
+            SdkEvents.AfterLoadSave.Subscribe(QueuePersistentColorRestore);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.AfterLoadSave.Unsubscribe(
+                    QueuePersistentColorRestore));
+
+            SonsSaveTools.Register(Saveable);
+            Lifecycle.CompleteStage(
+                () => SonsSaveTools.Unregister(Saveable));
+            _initialized = true;
         }
-        SdkEvents.OnAfterSpawn.Subscribe(QueuePersistentColorRestore);
-        SdkEvents.OnWorldExited.Subscribe(OnWorldExited);
-        SdkEvents.AfterLoadSave.Subscribe(QueuePersistentColorRestore);
-        SonsSaveTools.Register(Saveable);
-        _initialized = true;
+        catch
+        {
+            Deinitialize();
+            throw;
+        }
+    }
+
+    internal static void Deinitialize()
+    {
+        _initialized = false;
+        Lifecycle.Cleanup(
+            exception => RLog.Error(
+                $"[SOTFNeonLetters] Color runtime cleanup failed: {exception}"));
+        SessionColors.Clear();
+        PersistentColors.Clear();
+        EmissionBindings.Clear();
+        _restoreQueued = false;
     }
 
     internal static NeonRgba ResolveSessionColor(int instanceId)
@@ -63,19 +109,40 @@ public static class NeonLetterColorRuntime
             new NeonLetterColorSaveEntry(saveId, recipeId, color));
     }
 
+    internal static void RemoveSessionColor(int instanceId)
+    {
+        SessionColors.Remove(instanceId);
+    }
+
+    internal static void RemovePersistentColor(int saveId)
+    {
+        PersistentColors.Remove(saveId);
+    }
+
     internal static void ApplyEmission(
         GameObject structureRoot,
         NeonLetterSmallDefinition definition,
         NeonRgba color)
     {
-        Transform[] transforms = structureRoot.GetComponentsInChildren<Transform>(true);
-        var subtrees = new List<IEmissionVisualSubtree>(transforms.Length);
-        foreach (Transform transform in transforms)
+        int structureInstanceId = structureRoot.GetInstanceID();
+        NeonLetterEmissionBinding binding = EmissionBindings.GetOrCreate(
+            structureInstanceId,
+            structureRoot,
+            definition,
+            definition.RecipeId);
+        binding.Apply(color);
+    }
+
+    internal static void RemoveEmissionBinding(
+        int structureInstanceId,
+        GameObject structureRoot)
+    {
+        if (ReferenceEquals(structureRoot, null))
         {
-            subtrees.Add(new UnityEmissionVisualSubtree(transform));
+            return;
         }
 
-        NeonLetterEmissionPolicy.Apply(definition, subtrees, color);
+        EmissionBindings.Remove(structureInstanceId, structureRoot);
     }
 
     private static void OnUsePerformed()
@@ -212,6 +279,7 @@ public static class NeonLetterColorRuntime
         {
             SessionColors.Clear();
             PersistentColors.Clear();
+            EmissionBindings.Clear();
             _restoreQueued = false;
         }
     }
@@ -257,19 +325,88 @@ public static class NeonLetterColorRuntime
             : new UnityColorRestoreTarget(concreteStructure, definition);
     }
 
-    private sealed class UnityEmissionVisualSubtree : IEmissionVisualSubtree
+    private static bool IsStructureRootAlive(GameObject structureRoot)
     {
-        public UnityEmissionVisualSubtree(Transform root)
+        return structureRoot != null;
+    }
+
+    private static NeonLetterEmissionBinding CreateEmissionBinding(
+        GameObject structureRoot,
+        NeonLetterSmallDefinition definition)
+    {
+        Transform[] transforms =
+            structureRoot.GetComponentsInChildren<Transform>(true);
+        Transform selectedSubtree = null;
+        int matchingSubtreeCount = 0;
+        foreach (Transform transform in transforms)
         {
-            Name = root.name;
-            Renderers = root
-                .GetComponentsInChildren<Renderer>(true)
-                .Select(renderer => (IEmissionRenderer)new UnityEmissionRenderer(renderer))
-                .ToArray();
+            if (transform != null &&
+                string.Equals(
+                    transform.name,
+                    definition.ColliderVisualChildName,
+                    StringComparison.Ordinal))
+            {
+                selectedSubtree = transform;
+                matchingSubtreeCount++;
+            }
         }
 
-        public string Name { get; }
-        public IReadOnlyList<IEmissionRenderer> Renderers { get; }
+        if (matchingSubtreeCount != 1)
+        {
+            throw new InvalidOperationException(
+                $"Expected exactly one visual subtree named " +
+                $"'{definition.ColliderVisualChildName}', but found " +
+                $"{matchingSubtreeCount}.");
+        }
+
+        Renderer[] renderers =
+            selectedSubtree.GetComponentsInChildren<Renderer>(true);
+        if (renderers.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"Visual subtree '{selectedSubtree.name}' has no renderers.");
+        }
+
+        var slots = new List<IEmissionBindingSlot>();
+        foreach (Renderer renderer in renderers)
+        {
+            if (renderer == null)
+            {
+                throw new InvalidOperationException(
+                    $"Visual subtree '{selectedSubtree.name}' has a null renderer.");
+            }
+
+            // Registered Neon Letter prefabs keep renderer slot topology and
+            // material assignments immutable until dismantle, world exit, or shutdown.
+            Material[] materials = renderer.sharedMaterials;
+            if (materials == null || materials.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    $"Renderer '{renderer.name}' has no shared materials.");
+            }
+
+            for (int materialIndex = 0;
+                 materialIndex < materials.Length;
+                 materialIndex++)
+            {
+                Material material = materials[materialIndex];
+                if (material == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Renderer '{renderer.name}' has a null shared material " +
+                        $"at slot {materialIndex}.");
+                }
+
+                slots.Add(
+                    new UnityEmissionSlot(
+                        renderer,
+                        renderer.name,
+                        material,
+                        materialIndex));
+            }
+        }
+
+        return new NeonLetterEmissionBinding(slots);
     }
 
     private sealed class UnityColorRestoreTarget : INeonLetterColorRestoreTarget
@@ -311,61 +448,72 @@ public static class NeonLetterColorRuntime
         }
     }
 
-    private sealed class UnityEmissionRenderer : IEmissionRenderer
+    private sealed class UnityEmissionSlot : IEmissionBindingSlot
     {
-        private readonly Renderer _renderer;
+        private static readonly int EmissiveColorPropertyId =
+            Shader.PropertyToID(
+                NeonLetterEmissionPolicy.EmissiveColorPropertyName);
+        private static readonly int EmissiveIntensityPropertyId =
+            Shader.PropertyToID("_EmissiveIntensity");
 
-        public UnityEmissionRenderer(Renderer renderer)
+        private readonly Renderer _renderer;
+        private readonly string _rendererName;
+        private readonly Material _material;
+        private readonly int _materialIndex;
+        private readonly UnityEmissionPropertyBlock _propertyBlock =
+            new(new MaterialPropertyBlock(), EmissiveColorPropertyId);
+
+        public UnityEmissionSlot(
+            Renderer renderer,
+            string rendererName,
+            Material material,
+            int materialIndex)
         {
             _renderer = renderer;
-            Material[] materials = renderer.sharedMaterials;
-            SharedMaterials = materials
-                .Select(material => material == null
-                    ? null
-                    : (IEmissionMaterial)new UnityEmissionMaterial(material))
-                .ToArray();
-        }
-
-        public string Name => _renderer.name;
-        public IReadOnlyList<IEmissionMaterial> SharedMaterials { get; }
-
-        public IEmissionPropertyBlock ReadPropertyBlock(int materialIndex)
-        {
-            var propertyBlock = new MaterialPropertyBlock();
-            _renderer.GetPropertyBlock(propertyBlock, materialIndex);
-            return new UnityEmissionPropertyBlock(propertyBlock);
-        }
-
-        public void WritePropertyBlock(
-            int materialIndex,
-            IEmissionPropertyBlock propertyBlock)
-        {
-            var unityPropertyBlock = (UnityEmissionPropertyBlock)propertyBlock;
-            _renderer.SetPropertyBlock(unityPropertyBlock.Value, materialIndex);
-        }
-    }
-
-    private sealed class UnityEmissionMaterial : IEmissionMaterial
-    {
-        private const string EmissiveIntensityPropertyName = "_EmissiveIntensity";
-        private readonly Material _material;
-
-        public UnityEmissionMaterial(Material material)
-        {
+            _rendererName = rendererName;
             _material = material;
+            _materialIndex = materialIndex;
         }
+
+        public string RendererName => _rendererName;
+        public int MaterialIndex => _materialIndex;
+        public bool IsRendererAlive => _renderer != null;
+        public bool IsMaterialAlive => _material != null;
 
         public float ReadEmissiveIntensity()
         {
-            return _material.GetFloat(EmissiveIntensityPropertyName);
+            return _material.GetFloat(EmissiveIntensityPropertyId);
+        }
+
+        public IEmissionPropertyBlock ReadPropertyBlock()
+        {
+            _renderer.GetPropertyBlock(
+                _propertyBlock.Value,
+                _materialIndex);
+            return _propertyBlock;
+        }
+
+        public void WritePropertyBlock(
+            IEmissionPropertyBlock propertyBlock)
+        {
+            var unityPropertyBlock =
+                (UnityEmissionPropertyBlock)propertyBlock;
+            _renderer.SetPropertyBlock(
+                unityPropertyBlock.Value,
+                _materialIndex);
         }
     }
 
     private sealed class UnityEmissionPropertyBlock : IEmissionPropertyBlock
     {
-        public UnityEmissionPropertyBlock(MaterialPropertyBlock value)
+        private readonly int _emissiveColorPropertyId;
+
+        public UnityEmissionPropertyBlock(
+            MaterialPropertyBlock value,
+            int emissiveColorPropertyId)
         {
             Value = value;
+            _emissiveColorPropertyId = emissiveColorPropertyId;
         }
 
         public MaterialPropertyBlock Value { get; }
@@ -373,8 +521,12 @@ public static class NeonLetterColorRuntime
         public void SetColor(string propertyName, NeonRgba color)
         {
             Value.SetColor(
-                propertyName,
-                new Color(color.Red, color.Green, color.Blue, color.Alpha));
+                _emissiveColorPropertyId,
+                new Color(
+                    color.Red,
+                    color.Green,
+                    color.Blue,
+                    color.Alpha));
         }
     }
 }
@@ -435,6 +587,8 @@ public sealed class NeonLetterColorTarget
             return NeonLetterColorRuntime.ResolveSessionColor(_structureInstanceId);
         }
     }
+
+    internal int StructureInstanceId => _structureInstanceId;
 
     public void PreviewColor(NeonRgba color)
     {

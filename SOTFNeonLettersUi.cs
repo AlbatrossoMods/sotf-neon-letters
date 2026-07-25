@@ -14,6 +14,8 @@ public static class SOTFNeonLettersUi
     private static SLabelOptions _hexLabel;
     private static readonly NeonLetterColorEditorSession<NeonLetterColorTarget>
         EditorSession = new();
+    private static readonly NeonLetterUiDestroyCoordinator<NeonLetterColorTarget>
+        DestroyCoordinator = new();
     private static bool _created;
     private static bool _updatingWheel;
 
@@ -24,48 +26,72 @@ public static class SOTFNeonLettersUi
             return;
         }
 
-        _panel = RegisterNewPanel(PanelId, enableInput: true);
-        _panel
-            .Dock(EDockType.Fill)
-            .Background(new Color(0f, 0f, 0f, 0.72f), EBackground.None);
+        DestroyCoordinator.Begin();
+        try
+        {
+            _panel = RegisterNewPanel(PanelId, enableInput: true);
+            _panel
+                .Dock(EDockType.Fill)
+                .Background(new Color(0f, 0f, 0f, 0.72f), EBackground.None);
 
-        SContainerOptions card = SVertical
-            .Anchor(AnchorType.MiddleCenter)
-            .Pivot(0.5f, 0.5f)
-            .Size(520f, 650f)
-            .Padding(36f)
-            .Background(new Color(0.07f, 0.08f, 0.10f, 0.98f), EBackground.Round28);
+            SContainerOptions card = SVertical
+                .Anchor(AnchorType.MiddleCenter)
+                .Pivot(0.5f, 0.5f)
+                .Size(520f, 650f)
+                .Padding(36f)
+                .Background(
+                    new Color(0.07f, 0.08f, 0.10f, 0.98f),
+                    EBackground.Round28);
 
-        _colorWheel = SColorWheel
-            .Size(360f, 360f)
-            .PWidth(360f)
-            .PHeight(360f)
-            .MWidth(360f)
-            .MHeight(360f)
-            .BgActive(false)
-            .Notify(OnColorChanged);
-        _previewSwatch = SContainer
-            .Height(48f)
-            .Background(ToUnityColor(NeonRgba.ProjectCyan), EBackground.Round10);
-        _hexLabel = SLabel
-            .Text(NeonLetterColorFormatting.ToHex(NeonRgba.ProjectCyan))
-            .FontSize(24);
+            _colorWheel = SColorWheel
+                .Size(360f, 360f)
+                .PWidth(360f)
+                .PHeight(360f)
+                .MWidth(360f)
+                .MHeight(360f)
+                .BgActive(false)
+                .Notify(OnColorChanged);
+            _previewSwatch = SContainer
+                .Height(48f)
+                .Background(
+                    ToUnityColor(NeonRgba.ProjectCyan),
+                    EBackground.Round10);
+            _hexLabel = SLabel
+                .Text(NeonLetterColorFormatting.ToHex(NeonRgba.ProjectCyan))
+                .FontSize(24);
 
-        SContainerOptions buttons = SHorizontal
-            .Height(56f)
-            .Add(SButton.Text("APPLY").Notify(Apply))
-            .Add(SButton.Text("CANCEL").Notify(Cancel))
-            .Add(SButton.Text("RESET").Notify(Reset));
+            SContainerOptions buttons = SHorizontal
+                .Height(56f)
+                .Add(SButton.Text("APPLY").Notify(Apply))
+                .Add(SButton.Text("CANCEL").Notify(Cancel))
+                .Add(SButton.Text("RESET").Notify(Reset));
 
-        card
-            .Add(SLabel.Text("NEON LETTER COLOR").FontSize(30))
-            .Add(_colorWheel)
-            .Add(_previewSwatch)
-            .Add(_hexLabel)
-            .Add(buttons);
-        _panel.Add(card);
-        _panel.Active(false);
-        _created = true;
+            card
+                .Add(SLabel.Text("NEON LETTER COLOR").FontSize(30))
+                .Add(_colorWheel)
+                .Add(_previewSwatch)
+                .Add(_hexLabel)
+                .Add(buttons);
+            _panel.Add(card);
+            _panel.Active(false);
+            _created = true;
+        }
+        catch
+        {
+            Destroy();
+            throw;
+        }
+    }
+
+    internal static void Destroy()
+    {
+        DestroyCoordinator.Destroy(
+            EditorSession,
+            (target, color) => target.PreviewColor(color),
+            ClosePanel,
+            () => RemovePanel(PanelId),
+            ResetUiState,
+            LogDestroyError);
     }
 
     public static void Open(NeonLetterColorTarget target)
@@ -110,6 +136,19 @@ public static class SOTFNeonLettersUi
         {
             ClosePanel();
         }
+    }
+
+    internal static void OnDismantled(int structureInstanceId)
+    {
+        NeonLetterColorTarget target = EditorSession.Target;
+        if (target == null ||
+            target.StructureInstanceId != structureInstanceId)
+        {
+            return;
+        }
+
+        EditorSession.Close();
+        ClosePanel();
     }
 
     private static void OnColorChanged(Color color)
@@ -273,6 +312,23 @@ public static class SOTFNeonLettersUi
         {
             RLog.Error($"[SOTFNeonLetters] Failed to deactivate color panel: {exception}");
         }
+    }
+
+    private static void ResetUiState()
+    {
+        _panel = null;
+        _colorWheel = null;
+        _previewSwatch = null;
+        _hexLabel = null;
+        _created = false;
+        _updatingWheel = false;
+    }
+
+    private static void LogDestroyError(Exception exception)
+    {
+        RLog.Error(
+            $"[SOTFNeonLetters] Failed to tear down color editor UI: " +
+            exception);
     }
 
     private static Color ToUnityColor(NeonRgba color)

@@ -17,6 +17,7 @@ internal static class NeonLetterMultiplayerRuntime
     private const string SnapshotRequestEventId =
         "SOTFNeonLetters.ColorSnapshotRequest.v1";
     private const int PendingColorCapacity = 128;
+    private const int MaxPendingColorItemsPerTick = 16;
     private const double PendingColorLifetimeSeconds = 15d;
     private static readonly NeonLetterAuthoritativeColors<ulong> AuthoritativeColors =
         new();
@@ -25,10 +26,18 @@ internal static class NeonLetterMultiplayerRuntime
     private static readonly ColorChangeRequestEvent ChangeRequest = new();
     private static readonly ColorStateEvent ColorState = new();
     private static readonly ColorSnapshotRequestEvent SnapshotRequest = new();
+    private static readonly NeonLetterSnapshotRequestScheduler
+        SnapshotRequestScheduler = new();
+    private static readonly NeonLetterLifecycleCoordinator Lifecycle = new();
+    private static readonly Func<ulong, bool> IsLiveLetterIdentityCallback =
+        IsLiveLetterIdentity;
+    private static readonly Action<ulong, NeonRgba>
+        ApplyReplicatedColorCallback = ApplyReplicatedColor;
+    private static readonly Action<ulong, Exception>
+        PendingColorApplyErrorCallback = LogPendingColorApplyError;
     private static bool _changeRequestRegistered;
     private static bool _colorStateRegistered;
     private static bool _snapshotRequestRegistered;
-    private static bool _snapshotRequested;
     private static bool _initialized;
 
     public static void Initialize()
@@ -38,10 +47,46 @@ internal static class NeonLetterMultiplayerRuntime
             return;
         }
 
-        SdkEvents.OnAfterSpawn.Subscribe(RegisterHandlersForCurrentRole);
-        SdkEvents.OnInWorldUpdate.Subscribe(DrainPendingColors);
-        SdkEvents.OnWorldExited.Subscribe(OnWorldExited);
-        _initialized = true;
+        try
+        {
+            SdkEvents.OnAfterSpawn.Subscribe(RegisterHandlersForCurrentRole);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.OnAfterSpawn.Unsubscribe(
+                    RegisterHandlersForCurrentRole));
+
+            SdkEvents.OnInWorldUpdate.Subscribe(DrainPendingColors);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.OnInWorldUpdate.Unsubscribe(
+                    DrainPendingColors));
+
+            SdkEvents.OnInWorldUpdate.Subscribe(RequestSnapshot);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.OnInWorldUpdate.Unsubscribe(
+                    RequestSnapshot));
+
+            SdkEvents.OnWorldExited.Subscribe(OnWorldExited);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.OnWorldExited.Unsubscribe(OnWorldExited));
+            _initialized = true;
+        }
+        catch
+        {
+            Deinitialize();
+            throw;
+        }
+    }
+
+    internal static void Deinitialize()
+    {
+        _initialized = false;
+        UnregisterRoleHandlers();
+        Lifecycle.Cleanup(
+            exception => RLog.Error(
+                $"[SOTFNeonLetters] Multiplayer runtime cleanup failed: " +
+                exception));
+        AuthoritativeColors.Clear();
+        ReplicatedState.Clear();
+        SnapshotRequestScheduler.Rearm();
     }
 
     private static void RegisterHandlersForCurrentRole()
@@ -94,9 +139,30 @@ internal static class NeonLetterMultiplayerRuntime
 
     private static void UnregisterRoleHandlers()
     {
-        UnregisterChangeRequest();
-        UnregisterColorState();
-        UnregisterSnapshotRequest();
+        UnregisterRoleHandler(UnregisterChangeRequest);
+        UnregisterRoleHandler(UnregisterColorState);
+        UnregisterRoleHandler(UnregisterSnapshotRequest);
+    }
+
+    private static void UnregisterRoleHandler(Action unregister)
+    {
+        try
+        {
+            unregister();
+        }
+        catch (Exception exception)
+        {
+            try
+            {
+                RLog.Error(
+                    $"[SOTFNeonLetters] Multiplayer packet cleanup failed: " +
+                    exception);
+            }
+            catch
+            {
+                // Packet cleanup must continue even when logging fails.
+            }
+        }
     }
 
     private static void RegisterChangeRequest()
@@ -139,19 +205,30 @@ internal static class NeonLetterMultiplayerRuntime
             return;
         }
 
-        Packets.Unregister(ChangeRequest);
-        _changeRequestRegistered = false;
+        try
+        {
+            Packets.Unregister(ChangeRequest);
+        }
+        finally
+        {
+            _changeRequestRegistered = false;
+        }
     }
 
     private static void UnregisterColorState()
     {
-        if (_colorStateRegistered)
+        try
         {
-            Packets.Unregister(ColorState);
-            _colorStateRegistered = false;
+            if (_colorStateRegistered)
+            {
+                Packets.Unregister(ColorState);
+            }
         }
-
-        _snapshotRequested = false;
+        finally
+        {
+            _colorStateRegistered = false;
+            SnapshotRequestScheduler.Rearm();
+        }
     }
 
     private static void UnregisterSnapshotRequest()
@@ -161,8 +238,14 @@ internal static class NeonLetterMultiplayerRuntime
             return;
         }
 
-        Packets.Unregister(SnapshotRequest);
-        _snapshotRequestRegistered = false;
+        try
+        {
+            Packets.Unregister(SnapshotRequest);
+        }
+        finally
+        {
+            _snapshotRequestRegistered = false;
+        }
     }
 
     internal static bool RequestColor(BoltEntity entity, NeonRgba color)
@@ -217,6 +300,12 @@ internal static class NeonLetterMultiplayerRuntime
             : NeonRgba.ProjectCyan;
     }
 
+    internal static void RemoveDismantledColor(ulong networkIdentity)
+    {
+        AuthoritativeColors.Remove(networkIdentity);
+        ReplicatedState.Remove(networkIdentity);
+    }
+
     internal static bool TryRestoreHostColor(
         BoltEntity entity,
         int expectedRecipeId,
@@ -237,22 +326,29 @@ internal static class NeonLetterMultiplayerRuntime
 
     internal static void RequestSnapshot()
     {
-        if (_snapshotRequested ||
-            !_colorStateRegistered ||
+        if (!_colorStateRegistered ||
             !BoltNetwork.isRunning ||
             !NetUtils.IsClient ||
-            NetUtils.IsServer)
+            NetUtils.IsServer ||
+            !SnapshotRequestScheduler.CanAttempt)
         {
             return;
         }
 
-        _snapshotRequested = true;
+        double nowSeconds = Time.realtimeSinceStartupAsDouble;
+        if (!SnapshotRequestScheduler.IsDue(nowSeconds))
+        {
+            return;
+        }
+
         try
         {
             SnapshotRequest.SendRequest();
+            SnapshotRequestScheduler.RecordSuccessfulSend(nowSeconds);
         }
         catch (Exception exception)
         {
+            SnapshotRequestScheduler.DeferRetry(nowSeconds);
             RLog.Error(
                 $"[SOTFNeonLetters] Failed to send {SnapshotRequest.Id}: {exception}");
         }
@@ -295,12 +391,13 @@ internal static class NeonLetterMultiplayerRuntime
                 "A neon letter color state cannot use a zero network identity.");
         }
 
+        SnapshotRequestScheduler.Complete();
         ReplicatedState.Receive(
             networkId.PackedValue,
             color,
             Time.realtimeSinceStartupAsDouble,
-            IsLiveLetterIdentity,
-            ApplyReplicatedColor);
+            IsLiveLetterIdentityCallback,
+            ApplyReplicatedColorCallback);
     }
 
     private static void HandleSnapshotRequest(
@@ -351,7 +448,8 @@ internal static class NeonLetterMultiplayerRuntime
     {
         if (!BoltNetwork.isRunning ||
             !NetUtils.IsClient ||
-            NetUtils.IsServer)
+            NetUtils.IsServer ||
+            ReplicatedState.PendingCount == 0)
         {
             return;
         }
@@ -360,13 +458,10 @@ internal static class NeonLetterMultiplayerRuntime
         {
             ReplicatedState.DrainReady(
                 Time.realtimeSinceStartupAsDouble,
-                IsLiveLetterIdentity,
-                ApplyReplicatedColor,
-                (identity, exception) =>
-                    RLog.Error(
-                        $"[SOTFNeonLetters] Failed to apply pending " +
-                        $"{ColorState.Id} for network identity {identity}: " +
-                        exception));
+                MaxPendingColorItemsPerTick,
+                IsLiveLetterIdentityCallback,
+                ApplyReplicatedColorCallback,
+                PendingColorApplyErrorCallback);
         }
         catch (Exception exception)
         {
@@ -381,7 +476,7 @@ internal static class NeonLetterMultiplayerRuntime
         UnregisterRoleHandlers();
         AuthoritativeColors.Clear();
         ReplicatedState.Clear();
-        _snapshotRequested = false;
+        SnapshotRequestScheduler.Rearm();
     }
 
     private static bool IsLiveLetterIdentity(ulong identity)
@@ -409,6 +504,15 @@ internal static class NeonLetterMultiplayerRuntime
             structure.gameObject,
             definition,
             color);
+    }
+
+    private static void LogPendingColorApplyError(
+        ulong identity,
+        Exception exception)
+    {
+        RLog.Error(
+            $"[SOTFNeonLetters] Failed to apply pending {ColorState.Id} " +
+            $"for network identity {identity}: {exception}");
     }
 
     private static bool AcceptHostColor(NetworkId networkId, NeonRgba color)

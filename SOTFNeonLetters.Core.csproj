@@ -11,13 +11,18 @@
         <Compile Include="NeonLetterASmallDefinition.cs" />
         <Compile Include="NeonLetterColorPolicy.cs" />
         <Compile Include="NeonLetterEmissionPolicy.cs" />
+        <Compile Include="NeonLetterEmissionBinding.cs" />
+        <Compile Include="NeonLetterEmissionBindingCache.cs" />
         <Compile Include="NeonLetterColorInteractionPolicy.cs" />
         <Compile Include="NeonLetterMultiplayerPolicy.cs" />
+        <Compile Include="NeonLetterReentrantSnapshotPool.cs" />
         <Compile Include="NeonLetterMultiplayerState.cs" />
         <Compile Include="NeonLetterMultiplayerPersistencePolicy.cs" />
+        <Compile Include="NeonLetterSnapshotRequestScheduler.cs" />
         <Compile Include="NeonLetterColorPersistencePolicy.cs" />
         <Compile Include="NeonLetterRuntimePolicy.cs" />
         <Compile Include="NeonLetterDismantleRefundPolicy.cs" />
+        <Compile Include="NeonLetterLifecyclePolicy.cs" />
         <Compile Include="NeonSymbolManifest.cs" />
         <Compile Include="NeonLetterSmallCatalog.cs" />
     </ItemGroup>

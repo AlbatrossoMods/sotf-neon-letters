@@ -139,22 +139,28 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
 {
     public const double ReadinessTimeoutSeconds = 15d;
 
-    private readonly List<PendingRestore> _pending = new();
+    private readonly LinkedList<PendingRestore> _pending = new();
+    private readonly NeonLetterReentrantSnapshotPool<
+        LinkedListNode<PendingRestore>> _snapshotPool =
+            new();
     private NeonLetterMultiplayerSaveEnvelope _stagedEnvelope = new();
+    private LinkedListNode<PendingRestore>? _nextPending;
     private NeonLetterMultiplayerRestoreRole _role;
     private bool _hasStagedEnvelope;
+    private int _startedFallbackCount;
 
     public NeonLetterMultiplayerRestoreRole Role => _role;
     public bool HasStagedEnvelope => _hasStagedEnvelope;
     public int PendingCount => _pending.Count;
-    public int StartedFallbackCount =>
-        _pending.Count(entry => entry.State.FallbackSpawnStarted);
+    public int StartedFallbackCount => _startedFallbackCount;
 
     public void Stage(NeonLetterMultiplayerSaveEnvelope? envelope)
     {
         _stagedEnvelope = NeonLetterMultiplayerPersistencePolicy.Sanitize(envelope);
         _hasStagedEnvelope = true;
         _pending.Clear();
+        _nextPending = null;
+        _startedFallbackCount = 0;
         ApplyRoleToLoadedState();
     }
 
@@ -179,99 +185,225 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored,
         Action<NeonLetterMultiplayerSaveEntry, Exception> onEntryError)
     {
+        Advance(
+            nowSeconds,
+            int.MaxValue,
+            int.MaxValue,
+            observe,
+            startFallback,
+            applyRestored,
+            onEntryError);
+    }
+
+    /// <summary>
+    /// Advances at most the requested entries and fallback spawns in one slice.
+    /// </summary>
+    public void Advance(
+        double nowSeconds,
+        int maxItems,
+        int maxFallbackSpawns,
+        Func<NeonLetterMultiplayerSaveEntry, bool, TTarget?,
+            NeonLetterMultiplayerRestoreObservation<TTarget>> observe,
+        Func<NeonLetterMultiplayerSaveEntry, TTarget> startFallback,
+        Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored,
+        Action<NeonLetterMultiplayerSaveEntry, Exception> onEntryError)
+    {
         ValidateNowSeconds(nowSeconds);
+        if (maxItems < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxItems),
+                maxItems,
+                "Restore item budget cannot be negative.");
+        }
+
+        if (maxFallbackSpawns < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxFallbackSpawns),
+                maxFallbackSpawns,
+                "Restore fallback-spawn budget cannot be negative.");
+        }
+
         ArgumentNullException.ThrowIfNull(observe);
         ArgumentNullException.ThrowIfNull(startFallback);
         ArgumentNullException.ThrowIfNull(applyRestored);
         ArgumentNullException.ThrowIfNull(onEntryError);
 
-        if (_role != NeonLetterMultiplayerRestoreRole.Host)
+        if (_role != NeonLetterMultiplayerRestoreRole.Host ||
+            _pending.Count == 0 ||
+            maxItems == 0)
         {
             return;
         }
 
-        PendingRestore[] snapshot = _pending.ToArray();
-        foreach (PendingRestore pending in snapshot)
+        LinkedListNode<PendingRestore>? node =
+            _nextPending?.List == _pending
+                ? _nextPending
+                : _pending.First;
+        int nodesToInspect = _pending.Count;
+        List<LinkedListNode<PendingRestore>> snapshot =
+            _snapshotPool.Rent();
+        int fallbackSpawns = 0;
+        try
         {
-            try
+            for (int inspected = 0;
+                 inspected < nodesToInspect &&
+                 snapshot.Count < maxItems &&
+                 node != null;
+                 inspected++)
             {
-                NeonLetterMultiplayerRestoreObservation<TTarget> observation =
-                    observe(
-                        pending.Entry,
-                        pending.State.FallbackSpawnStarted,
-                        pending.SpawnedTarget);
-                switch (observation.Kind)
+                LinkedListNode<PendingRestore> candidate = node;
+                node = node.Next ?? _pending.First;
+                if (!_snapshotPool.IsReservedByOuterBuffer(candidate))
                 {
-                    case NeonLetterMultiplayerRestoreObservationKind.ProcessedRecipeUnavailable:
-                    case NeonLetterMultiplayerRestoreObservationKind.FallbackPrefabUnavailable:
-                    case NeonLetterMultiplayerRestoreObservationKind.NativeRecipeUnavailable:
-                    case NeonLetterMultiplayerRestoreObservationKind.NativeTargetUnavailable:
-                    case NeonLetterMultiplayerRestoreObservationKind.FallbackTargetUnavailable:
-                        TrackReadinessOrThrow(
-                            pending,
-                            observation.Kind,
-                            nowSeconds);
-                        break;
-
-                    case NeonLetterMultiplayerRestoreObservationKind.NativeRecipeMismatch:
-                        if (!observation.ResolvedRecipeId.HasValue ||
-                            observation.ResolvedRecipeId.Value ==
-                            pending.Entry.RecipeId)
-                        {
-                            throw new InvalidOperationException(
-                                "A terminal native recipe mismatch requires " +
-                                "a definite differing recipe ID.");
-                        }
-
-                        pending.State.Decide(
-                            nativeIdentityResolved: true,
-                            observation.ResolvedRecipeId.Value);
-                        _pending.Remove(pending);
-                        break;
-
-                    case NeonLetterMultiplayerRestoreObservationKind.NativeTargetReady:
-                        ApplyReadyTarget(
-                            pending,
-                            observation,
-                            applyRestored,
-                            nowSeconds);
-                        break;
-
-                    case NeonLetterMultiplayerRestoreObservationKind.ReadyToSpawnFallback:
-                        pending.ResetReadiness();
-                        if (pending.State.Decide(
-                                nativeIdentityResolved: false,
-                                resolvedRecipeId: default) ==
-                            NeonLetterMultiplayerRestoreDecision.SpawnFallback)
-                        {
-                            pending.State.MarkFallbackSpawnStarted();
-                            pending.SpawnedTarget = startFallback(pending.Entry);
-                        }
-                        break;
-
-                    case NeonLetterMultiplayerRestoreObservationKind.FallbackTargetReady:
-                        ApplyReadyTarget(
-                            pending,
-                            observation,
-                            applyRestored,
-                            nowSeconds);
-                        break;
-
-                    default:
-                        throw new InvalidOperationException(
-                            $"Unsupported multiplayer restore observation " +
-                            $"{observation.Kind}.");
+                    snapshot.Add(candidate);
                 }
             }
-            catch (Exception exception)
+
+            _nextPending = node;
+            foreach (LinkedListNode<PendingRestore> currentNode in snapshot)
             {
-                _pending.Remove(pending);
-                onEntryError(pending.Entry, exception);
+                PendingRestore pending = currentNode.Value;
+                try
+                {
+                    NeonLetterMultiplayerRestoreObservation<TTarget>
+                        observation = observe(
+                            pending.Entry,
+                            pending.State.FallbackSpawnStarted,
+                            pending.SpawnedTarget);
+                    ProcessObservation(
+                        currentNode,
+                        pending,
+                        observation,
+                        nowSeconds,
+                        maxFallbackSpawns,
+                        ref fallbackSpawns,
+                        observe,
+                        startFallback,
+                        applyRestored);
+                }
+                catch (Exception exception)
+                {
+                    RemovePending(currentNode);
+                    onEntryError(pending.Entry, exception);
+                }
             }
+        }
+        finally
+        {
+            _snapshotPool.Return(snapshot);
+        }
+    }
+
+    private void ProcessObservation(
+        LinkedListNode<PendingRestore> node,
+        PendingRestore pending,
+        NeonLetterMultiplayerRestoreObservation<TTarget> observation,
+        double nowSeconds,
+        int maxFallbackSpawns,
+        ref int fallbackSpawns,
+        Func<NeonLetterMultiplayerSaveEntry, bool, TTarget?,
+            NeonLetterMultiplayerRestoreObservation<TTarget>> observe,
+        Func<NeonLetterMultiplayerSaveEntry, TTarget> startFallback,
+        Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored)
+    {
+        switch (observation.Kind)
+        {
+            case NeonLetterMultiplayerRestoreObservationKind.ProcessedRecipeUnavailable:
+            case NeonLetterMultiplayerRestoreObservationKind.FallbackPrefabUnavailable:
+            case NeonLetterMultiplayerRestoreObservationKind.NativeRecipeUnavailable:
+            case NeonLetterMultiplayerRestoreObservationKind.NativeTargetUnavailable:
+            case NeonLetterMultiplayerRestoreObservationKind.FallbackTargetUnavailable:
+                TrackReadinessOrThrow(
+                    pending,
+                    observation.Kind,
+                    nowSeconds);
+                break;
+
+            case NeonLetterMultiplayerRestoreObservationKind.NativeRecipeMismatch:
+                if (!observation.ResolvedRecipeId.HasValue ||
+                    observation.ResolvedRecipeId.Value ==
+                    pending.Entry.RecipeId)
+                {
+                    throw new InvalidOperationException(
+                        "A terminal native recipe mismatch requires " +
+                        "a definite differing recipe ID.");
+                }
+
+                pending.State.Decide(
+                    nativeIdentityResolved: true,
+                    observation.ResolvedRecipeId.Value);
+                RemovePending(node);
+                break;
+
+            case NeonLetterMultiplayerRestoreObservationKind.NativeTargetReady:
+            case NeonLetterMultiplayerRestoreObservationKind.FallbackTargetReady:
+                ApplyReadyTarget(
+                    node,
+                    pending,
+                    observation,
+                    applyRestored,
+                    nowSeconds);
+                break;
+
+            case NeonLetterMultiplayerRestoreObservationKind.ReadyToSpawnFallback:
+                pending.ResetReadiness();
+                if (fallbackSpawns >= maxFallbackSpawns)
+                {
+                    break;
+                }
+
+                if (pending.Entry.NativeSaveId != 0)
+                {
+                    NeonLetterMultiplayerRestoreObservation<TTarget>
+                        finalObservation = observe(
+                            pending.Entry,
+                            pending.State.FallbackSpawnStarted,
+                            pending.SpawnedTarget);
+                    if (finalObservation.Kind !=
+                        NeonLetterMultiplayerRestoreObservationKind
+                            .ReadyToSpawnFallback)
+                    {
+                        ProcessObservation(
+                            node,
+                            pending,
+                            finalObservation,
+                            nowSeconds,
+                            maxFallbackSpawns,
+                            ref fallbackSpawns,
+                            observe,
+                            startFallback,
+                            applyRestored);
+                        break;
+                    }
+                }
+
+                if (pending.State.Decide(
+                        nativeIdentityResolved: false,
+                        resolvedRecipeId: default) ==
+                    NeonLetterMultiplayerRestoreDecision.SpawnFallback)
+                {
+                    pending.State.MarkFallbackSpawnStarted();
+                    if (node.List == _pending)
+                    {
+                        _startedFallbackCount++;
+                    }
+
+                    fallbackSpawns++;
+                    pending.SpawnedTarget = startFallback(pending.Entry);
+                }
+                break;
+
+            default:
+                throw new InvalidOperationException(
+                    $"Unsupported multiplayer restore observation " +
+                    $"{observation.Kind}.");
         }
     }
 
     private void ApplyReadyTarget(
+        LinkedListNode<PendingRestore> node,
         PendingRestore pending,
         NeonLetterMultiplayerRestoreObservation<TTarget> observation,
         Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored,
@@ -285,7 +417,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
 
         if (applyRestored(pending.Entry, observation.Target))
         {
-            _pending.Remove(pending);
+            RemovePending(node);
             return;
         }
 
@@ -293,6 +425,29 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
             pending,
             observation.Kind,
             nowSeconds);
+    }
+
+    private void RemovePending(LinkedListNode<PendingRestore> node)
+    {
+        if (node.List != _pending)
+        {
+            return;
+        }
+
+        if (node.Value.State.FallbackSpawnStarted)
+        {
+            _startedFallbackCount--;
+        }
+
+        LinkedListNode<PendingRestore>? next =
+            node.Next ?? _pending.First;
+        _pending.Remove(node);
+        if (ReferenceEquals(_nextPending, node))
+        {
+            _nextPending = next?.List == _pending
+                ? next
+                : _pending.First;
+        }
     }
 
     private static void TrackReadinessOrThrow(
@@ -345,8 +500,9 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         _hasStagedEnvelope = false;
         foreach (NeonLetterMultiplayerSaveEntry entry in accepted.Entries)
         {
-            _pending.Add(new PendingRestore(entry));
+            _pending.AddLast(new PendingRestore(entry));
         }
+        _nextPending = _pending.First;
     }
 
     private void ApplyRoleToLoadedState()
@@ -369,6 +525,8 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         _stagedEnvelope = new NeonLetterMultiplayerSaveEnvelope();
         _hasStagedEnvelope = false;
         _pending.Clear();
+        _nextPending = null;
+        _startedFallbackCount = 0;
     }
 
     private void ResetPendingReadiness()
