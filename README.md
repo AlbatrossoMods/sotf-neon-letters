@@ -47,9 +47,19 @@ The complete local gate rebuilds the Windows bundle, validates the generated Uni
 For a faster .NET-only check while changing pure contracts, set `SOTF_NEON_DOTNET` to the .NET 6 executable when it is not already available on `PATH`:
 
 ```bash
-"${SOTF_NEON_DOTNET:-dotnet}" run \
-  --project tests/SOTFNeonLetters.ContractTests/SOTFNeonLetters.ContractTests.csproj
+"${SOTF_NEON_DOTNET:-dotnet}" test \
+  tests/SOTFNeonLetters.ContractTests/SOTFNeonLetters.ContractTests.csproj
 ```
+
+## Mutation testing
+
+Run mutation testing for the pure policy and catalog code with:
+
+```bash
+./tools/test-mutation.sh
+```
+
+The repository pins Stryker.NET `3.10.0` because the project uses .NET 6; the script restores the local tool and runs the existing contract suite through xUnit. It intentionally excludes Unity, RedLoader runtime adapters, and release packaging code. HTML output is written to `StrykerOutput/` and is ignored by Git.
 
 Release fails if `unity/SOTFNeonLetters.Assets/Build/AssetBundles/Windows/sotfneonletters` is absent. When present, the build targets copy it beside `Mods/SOTFNeonLetters/manifest.json`; the Release zip contains the same `Mods/SOTFNeonLetters/sotfneonletters` layout.
 

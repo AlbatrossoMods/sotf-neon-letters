@@ -2,54 +2,51 @@ using SOTFNeonLetters;
 using RedLoader;
 using System.Security.Cryptography;
 using System.Text.Json;
+using Xunit;
 
-var failures = new List<string>();
-
-CheckAssetContract();
-CheckExtensionSourceContract();
-CheckCraftingContract();
-CheckDismantleRefundContract();
-CheckWallPlacementContract();
-CheckColliderContract();
-CheckRuntimeColliderPolicyContract();
-CheckBookContract();
-CheckPlacementApplication();
-CheckRuntimeMaterialReplacement();
-CheckBookPageRegistration();
-CheckAlphabetCatalog();
-CheckExpandedSymbolCatalogContract();
-CheckAlphabetRuntimeBindings();
-CheckBookPageCoordinator();
-CheckColorEditingContract();
-CheckMultiplayerProtocolContract();
-CheckMultiplayerStateContract();
-CheckMultiplayerPersistenceContract();
-CheckMultiplayerRestoreCoordinatorContract();
-CheckMultiplayerNativeRestoreCoordinatorContract();
-CheckMultiplayerRestoreFailureIsolationContract();
-CheckMultiplayerRestoreRoleContract();
-CheckMultiplayerRestoreReadinessTimeoutContract();
-CheckColorPersistenceContract();
-CheckExtendedSymbolRuntimePolicyContract();
-CheckColorRestoreContract();
-CheckEmissionApplicationContract();
-CheckColorInteractionContract();
-CheckColorRuntimeSafetyContract();
-CheckColorPickerLayoutContract();
-
-if (failures.Count > 0)
+public sealed class ContractTests
 {
-    Console.Error.WriteLine($"Contract tests failed: {failures.Count}");
-    foreach (string failure in failures)
+    private readonly List<string> failures = new();
+
+    [Fact]
+    public void BehaviorContractsAreSatisfied()
     {
-        Console.Error.WriteLine($"- {failure}");
+        CheckAssetContract();
+        CheckExtensionSourceContract();
+        CheckCraftingContract();
+        CheckDismantleRefundContract();
+        CheckWallPlacementContract();
+        CheckColliderContract();
+        CheckRuntimeColliderPolicyContract();
+        CheckBookContract();
+        CheckPlacementApplication();
+        CheckRuntimeMaterialReplacement();
+        CheckBookPageRegistration();
+        CheckAlphabetCatalog();
+        CheckExpandedSymbolCatalogContract();
+        CheckAlphabetRuntimeBindings();
+        CheckBookPageCoordinator();
+        CheckColorEditingContract();
+        CheckMultiplayerProtocolContract();
+        CheckMultiplayerStateContract();
+        CheckMultiplayerPersistenceContract();
+        CheckMultiplayerRestoreCoordinatorContract();
+        CheckMultiplayerNativeRestoreCoordinatorContract();
+        CheckMultiplayerRestoreFailureIsolationContract();
+        CheckMultiplayerRestoreRoleContract();
+        CheckMultiplayerRestoreReadinessTimeoutContract();
+        CheckColorPersistenceContract();
+        CheckExtendedSymbolRuntimePolicyContract();
+        CheckColorRestoreContract();
+        CheckEmissionApplicationContract();
+        CheckColorInteractionContract();
+        CheckColorRuntimeSafetyContract();
+        CheckColorPickerLayoutContract();
+
+        Assert.True(
+            failures.Count == 0,
+            $"Contract tests failed: {failures.Count}{Environment.NewLine}- {string.Join(Environment.NewLine + "- ", failures)}");
     }
-
-    return 1;
-}
-
-Console.WriteLine("All SOTFNeonLetters behavior contract tests passed.");
-return 0;
 
 void CheckAssetContract()
 {
@@ -4039,6 +4036,8 @@ void CheckSequence<T>(IEnumerable<T> expected, IEnumerable<T> actual, string tes
             $"{testName}: expected [{string.Join(", ", expectedItems)}], " +
             $"got [{string.Join(", ", actualItems)}].");
     }
+}
+
 }
 
 sealed class FakePlacementTarget : IRecipePlacementTarget

@@ -31,8 +31,8 @@ if [[ "$dotnet" == "$local_dotnet" || -n "${DOTNET_ROOT:-}" ]]; then
 fi
 
 contract_arguments=(
-  run
-  --project "$repo_root/tests/SOTFNeonLetters.ContractTests/SOTFNeonLetters.ContractTests.csproj"
+  test
+  "$repo_root/tests/SOTFNeonLetters.ContractTests/SOTFNeonLetters.ContractTests.csproj"
 )
 build_arguments=(
   build "$repo_root/SOTFNeonLetters.csproj"

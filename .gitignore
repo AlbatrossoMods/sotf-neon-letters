@@ -6,6 +6,9 @@ ReleaseBuild/
 # Local toolchains and downloaded dependencies
 .tools/
 
+# Mutation-test reports
+StrykerOutput/
+
 # Local game and IDE paths
 SOTFNeonLetters.csproj.user
 .run/

@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net6.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <Compile Include="NeonLetterASmallDefinition.cs" />
+        <Compile Include="NeonLetterColorPolicy.cs" />
+        <Compile Include="NeonLetterEmissionPolicy.cs" />
+        <Compile Include="NeonLetterColorInteractionPolicy.cs" />
+        <Compile Include="NeonLetterMultiplayerPolicy.cs" />
+        <Compile Include="NeonLetterMultiplayerState.cs" />
+        <Compile Include="NeonLetterMultiplayerPersistencePolicy.cs" />
+        <Compile Include="NeonLetterColorPersistencePolicy.cs" />
+        <Compile Include="NeonLetterRuntimePolicy.cs" />
+        <Compile Include="NeonLetterDismantleRefundPolicy.cs" />
+        <Compile Include="NeonSymbolManifest.cs" />
+        <Compile Include="NeonLetterSmallCatalog.cs" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+            <_Parameter1>SOTFNeonLetters.ContractTests</_Parameter1>
+        </AssemblyAttribute>
+    </ItemGroup>
+
+</Project>
