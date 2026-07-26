@@ -52,6 +52,18 @@ public sealed class NeonLetterSnapshotRequestScheduler
     }
 
     /// <summary>
+    /// Extends the retry deadline while the current snapshot is making progress.
+    /// </summary>
+    public void DeferRetryForProgress(double nowSeconds)
+    {
+        ValidateNowSeconds(nowSeconds);
+        if (CanAttempt)
+        {
+            ScheduleNextAttempt(nowSeconds);
+        }
+    }
+
+    /// <summary>
     /// Re-arms immediate snapshot synchronization for a new client session.
     /// </summary>
     public void Rearm()

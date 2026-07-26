@@ -191,6 +191,32 @@ public sealed class NeonLetterPendingColors<TKey>
         _nextPending ??= node;
     }
 
+    internal void EnsureCanRetainBatch<TEntry>(
+        IReadOnlyList<TEntry> entries,
+        double nowSeconds,
+        Func<TEntry, TKey> getIdentity)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        ArgumentNullException.ThrowIfNull(getIdentity);
+        ValidateNowSeconds(nowSeconds);
+        PruneExpired(nowSeconds);
+
+        int availableCount = _capacity - _colors.Count;
+        var additionalIdentities = new HashSet<TKey>();
+        foreach (TEntry entry in entries)
+        {
+            TKey identity = getIdentity(entry);
+            if (!_colors.ContainsKey(identity) &&
+                additionalIdentities.Add(identity) &&
+                additionalIdentities.Count > availableCount)
+            {
+                throw new InvalidOperationException(
+                    "The complete snapshot batch cannot be retained without " +
+                    "discarding pending replicated color state.");
+            }
+        }
+    }
+
     public int ApplyReady(
         double nowSeconds,
         Func<TKey, bool> isReady,
@@ -563,6 +589,47 @@ public sealed class NeonLetterReplicatedColorState<TKey>
                 _resolvedColors.Commit(candidateIdentity, candidateColor);
             });
         return appliedCount == 1;
+    }
+
+    internal int ReceiveBatch<TEntry>(
+        IReadOnlyList<TEntry> entries,
+        double nowSeconds,
+        Func<TEntry, TKey> getIdentity,
+        Func<TEntry, NeonRgba> getColor,
+        Func<TKey, bool> isReady,
+        Action<TKey, NeonRgba> apply)
+    {
+        ArgumentNullException.ThrowIfNull(entries);
+        ArgumentNullException.ThrowIfNull(getIdentity);
+        ArgumentNullException.ThrowIfNull(getColor);
+        ArgumentNullException.ThrowIfNull(isReady);
+        ArgumentNullException.ThrowIfNull(apply);
+
+        _pendingColors.EnsureCanRetainBatch(
+            entries,
+            nowSeconds,
+            getIdentity);
+        if (entries.Count == 0)
+        {
+            return 0;
+        }
+
+        foreach (TEntry entry in entries)
+        {
+            _pendingColors.Enqueue(
+                getIdentity(entry),
+                getColor(entry),
+                nowSeconds);
+        }
+
+        return _pendingColors.ApplyReady(
+            nowSeconds,
+            isReady,
+            (identity, color) =>
+            {
+                apply(identity, color);
+                _resolvedColors.Commit(identity, color);
+            });
     }
 
     public int DrainReady(
