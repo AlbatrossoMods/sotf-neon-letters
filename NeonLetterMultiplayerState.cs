@@ -13,6 +13,17 @@ public readonly record struct NeonLetterColorAcceptance(
         : this(accepted, authoritativeColor, Revision: 0)
     {
     }
+
+    /// <summary>
+    /// Deconstructs the acceptance using the original two-value public contract.
+    /// </summary>
+    public void Deconstruct(
+        out bool accepted,
+        out NeonRgba authoritativeColor)
+    {
+        accepted = Accepted;
+        authoritativeColor = AuthoritativeColor;
+    }
 }
 
 internal delegate bool NeonLetterPendingReadyCallback<TState, TKey>(

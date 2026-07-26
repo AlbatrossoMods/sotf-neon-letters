@@ -249,6 +249,130 @@ public sealed class MultiplayerSessionProtocolTests
     }
 
     [Fact]
+    public void PeerSendFailureDoesNotBlockLaterAcceptedPeers()
+    {
+        string[] peers = { "first", "middle", "third" };
+        var attempted = new List<string>();
+        var received = new List<string>();
+        var disconnects = new NeonLetterDeferredDisconnects<string>();
+
+        NeonLetterPeerDelivery.Deliver(
+            peers,
+            isAccepted: _ => true,
+            send: peer =>
+            {
+                attempted.Add(peer);
+                if (peer == "middle")
+                {
+                    throw new InvalidOperationException("send failed");
+                }
+
+                received.Add(peer);
+            },
+            onFailure: (peer, _) => disconnects.Schedule(peer));
+
+        Assert.Equal(
+            ("first,middle,third", "first,third", 1, true),
+            (
+                string.Join(",", attempted),
+                string.Join(",", received),
+                disconnects.Count,
+                disconnects.Contains("middle")));
+    }
+
+    [Fact]
+    public void DeferredDisconnectRetriesTransientFailureWithoutRepeatedLogging()
+    {
+        var deferred = new NeonLetterDeferredDisconnects<string>();
+        deferred.Schedule("peer");
+        int attempts = 0;
+        int failureLogs = 0;
+
+        deferred.Drain(
+            exists: _ => true,
+            execute: _ =>
+            {
+                attempts++;
+                throw new InvalidOperationException("first failure");
+            },
+            onFirstFailure: (_, _) => failureLogs++);
+        (int Pending, int Logs) afterFirst =
+            (deferred.Count, failureLogs);
+        deferred.Drain(
+            exists: _ => true,
+            execute: _ =>
+            {
+                attempts++;
+                throw new InvalidOperationException("repeated failure");
+            },
+            onFirstFailure: (_, _) => failureLogs++);
+        (int Pending, int Logs) afterSecond =
+            (deferred.Count, failureLogs);
+        deferred.Drain(
+            exists: _ => true,
+            execute: _ => attempts++,
+            onFirstFailure: (_, _) => failureLogs++);
+
+        Assert.Equal(
+            ((1, 1), (1, 1), 3, 0),
+            (afterFirst, afterSecond, attempts, deferred.Count));
+    }
+
+    [Fact]
+    public void DeferredDisconnectClearsWhenPeerDisappears()
+    {
+        var deferred = new NeonLetterDeferredDisconnects<string>();
+        deferred.Schedule("peer");
+        int attempts = 0;
+        int failureLogs = 0;
+
+        deferred.Drain(
+            exists: _ => false,
+            execute: _ => attempts++,
+            onFirstFailure: (_, _) => failureLogs++);
+
+        Assert.Equal((0, 0, 0), (deferred.Count, attempts, failureLogs));
+    }
+
+    [Fact]
+    public void FatalRoleSetupFailureBlocksAdvanceAndSpawnUntilLifecycleReset()
+    {
+        var gate = new NeonLetterRoleSetupGate();
+        int setupAttempts = 0;
+
+        Exception? firstFailure = gate.TryRun(FailSetup);
+        Exception? advanceFailure = gate.TryRun(FailSetup);
+        Exception? spawnFailure = gate.TryRun(FailSetup);
+        bool failedBeforeReset = gate.IsFailed;
+        gate.Reset();
+        Exception? afterResetFailure = gate.TryRun(() => setupAttempts++);
+
+        Assert.Equal(
+            (
+                2,
+                typeof(IOException),
+                (Type?)null,
+                (Type?)null,
+                true,
+                false,
+                (Type?)null),
+            (
+                setupAttempts,
+                firstFailure?.GetType(),
+                advanceFailure?.GetType(),
+                spawnFailure?.GetType(),
+                failedBeforeReset,
+                gate.IsFailed,
+                afterResetFailure?.GetType()));
+
+        void FailSetup()
+        {
+            setupAttempts++;
+            throw new IOException("bundle unavailable");
+        }
+    }
+
+    [Fact]
     public void RequestIdsAreNonzeroMonotonicAndReapplySupersedesPerEntity()
     {
         var coordinator = new NeonLetterClientApplyCoordinator<int>(
@@ -481,7 +605,7 @@ public sealed class MultiplayerSessionProtocolTests
     }
 
     [Fact]
-    public void HostDedupeEvictsTheOldestRequestAtItsPerPeerCapacity()
+    public void HostRejectsAnEvictedReplayWithoutMutatingAuthoritativeState()
     {
         const int capacity =
             NeonLetterHostApplyProtocol.MaxCachedRequestsPerPeer;
@@ -502,6 +626,11 @@ public sealed class MultiplayerSessionProtocolTests
                 Red);
         }
 
+        bool replayDetected = coordinator.TryResolveReplay(
+            "peer",
+            requestId: 1,
+            identity: 7,
+            out NeonLetterApplyResult<int> staleResult);
         NeonLetterHostApplyOutcome<int> replayed = coordinator.Process(
             "peer",
             requestId: 1,
@@ -512,8 +641,130 @@ public sealed class MultiplayerSessionProtocolTests
             Blue);
 
         Assert.Equal(
-            (true, (ulong)capacity + 2),
-            (replayed.ShouldBroadcast, replayed.Result.Revision));
+            (
+                true,
+                NeonLetterApplyStatus.Rejected,
+                NeonLetterApplyStatus.Rejected,
+                false,
+                (ulong)capacity + 1,
+                Red),
+            (
+                replayDetected,
+                staleResult.Status,
+                replayed.Result.Status,
+                replayed.ShouldBroadcast,
+                replayed.Result.Revision,
+                authoritative.Resolve(7)));
+    }
+
+    [Fact]
+    public void HostRejectsNonMonotonicRequestAndAcceptsNextHigherId()
+    {
+        var authoritative = new NeonLetterAuthoritativeColors<int>();
+        var coordinator =
+            new NeonLetterHostApplyCoordinator<string, int>(authoritative);
+        coordinator.Process(
+            "peer",
+            requestId: 10,
+            identity: 7,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Red);
+
+        NeonLetterHostApplyOutcome<int> stale = coordinator.Process(
+            "peer",
+            requestId: 9,
+            identity: 7,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Blue);
+        NeonLetterHostApplyOutcome<int> next = coordinator.Process(
+            "peer",
+            requestId: 11,
+            identity: 7,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Green);
+
+        Assert.Equal(
+            (
+                NeonLetterApplyStatus.Rejected,
+                false,
+                1ul,
+                NeonLetterApplyStatus.Accepted,
+                true,
+                2ul,
+                Green),
+            (
+                stale.Result.Status,
+                stale.ShouldBroadcast,
+                stale.Result.Revision,
+                next.Result.Status,
+                next.ShouldBroadcast,
+                next.Result.Revision,
+                authoritative.Resolve(7)));
+    }
+
+    [Fact]
+    public void HostRequestWatermarkHandlesUlongMaximumWithoutWrapping()
+    {
+        var authoritative = new NeonLetterAuthoritativeColors<int>();
+        var coordinator =
+            new NeonLetterHostApplyCoordinator<string, int>(authoritative);
+        coordinator.Process(
+            "peer",
+            requestId: ulong.MaxValue - 1,
+            identity: 7,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Red);
+        NeonLetterHostApplyOutcome<int> maximum = coordinator.Process(
+            "peer",
+            requestId: ulong.MaxValue,
+            identity: 7,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Blue);
+
+        NeonLetterHostApplyOutcome<int> lower = coordinator.Process(
+            "peer",
+            requestId: ulong.MaxValue - 2,
+            identity: 7,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Green);
+        NeonLetterHostApplyOutcome<int> duplicateMaximum = coordinator.Process(
+            "peer",
+            requestId: ulong.MaxValue,
+            identity: 8,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[1].RecipeId,
+            Green);
+
+        Assert.Equal(
+            (
+                NeonLetterApplyStatus.Accepted,
+                2ul,
+                NeonLetterApplyStatus.Rejected,
+                false,
+                maximum.Result,
+                false,
+                Blue),
+            (
+                maximum.Result.Status,
+                maximum.Result.Revision,
+                lower.Result.Status,
+                lower.ShouldBroadcast,
+                duplicateMaximum.Result,
+                duplicateMaximum.ShouldBroadcast,
+                authoritative.Resolve(7)));
     }
 
     [Fact]
@@ -594,6 +845,16 @@ public sealed class MultiplayerSessionProtocolTests
                 firstB.Revision,
                 secondA.Revision,
                 rejectedB.Revision));
+    }
+
+    [Fact]
+    public void ColorAcceptanceSupportsTwoValueDeconstruction()
+    {
+        var acceptance = new NeonLetterColorAcceptance(true, Green, Revision: 7);
+
+        (bool accepted, NeonRgba authoritativeColor) = acceptance;
+
+        Assert.Equal((true, Green), (accepted, authoritativeColor));
     }
 
     [Fact]

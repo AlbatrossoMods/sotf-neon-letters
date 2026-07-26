@@ -564,3 +564,128 @@ internal sealed class NeonLetterHelloScheduler
         }
     }
 }
+
+internal static class NeonLetterPeerDelivery
+{
+    public static void Deliver<TPeer>(
+        IEnumerable<TPeer> peers,
+        Func<TPeer, bool> isAccepted,
+        Action<TPeer> send,
+        Action<TPeer, Exception> onFailure)
+    {
+        ArgumentNullException.ThrowIfNull(peers);
+        ArgumentNullException.ThrowIfNull(isAccepted);
+        ArgumentNullException.ThrowIfNull(send);
+        ArgumentNullException.ThrowIfNull(onFailure);
+
+        foreach (TPeer peer in peers)
+        {
+            if (!isAccepted(peer))
+            {
+                continue;
+            }
+
+            try
+            {
+                send(peer);
+            }
+            catch (Exception exception)
+            {
+                onFailure(peer, exception);
+            }
+        }
+    }
+}
+
+internal sealed class NeonLetterDeferredDisconnects<TKey>
+    where TKey : notnull
+{
+    private readonly HashSet<TKey> _pending = new();
+    private readonly HashSet<TKey> _reportedFailures = new();
+
+    public int Count => _pending.Count;
+
+    public void Schedule(TKey key)
+    {
+        _pending.Add(key);
+    }
+
+    public bool Contains(TKey key)
+    {
+        return _pending.Contains(key);
+    }
+
+    public void Remove(TKey key)
+    {
+        _pending.Remove(key);
+        _reportedFailures.Remove(key);
+    }
+
+    public void Clear()
+    {
+        _pending.Clear();
+        _reportedFailures.Clear();
+    }
+
+    public void Drain(
+        Func<TKey, bool> exists,
+        Action<TKey> execute,
+        Action<TKey, Exception> onFirstFailure)
+    {
+        ArgumentNullException.ThrowIfNull(exists);
+        ArgumentNullException.ThrowIfNull(execute);
+        ArgumentNullException.ThrowIfNull(onFirstFailure);
+
+        foreach (TKey key in _pending.ToArray())
+        {
+            if (!exists(key))
+            {
+                Remove(key);
+                continue;
+            }
+
+            try
+            {
+                execute(key);
+                Remove(key);
+            }
+            catch (Exception exception)
+            {
+                if (_reportedFailures.Add(key))
+                {
+                    onFirstFailure(key, exception);
+                }
+            }
+        }
+    }
+}
+
+internal sealed class NeonLetterRoleSetupGate
+{
+    public bool IsFailed { get; private set; }
+
+    public Exception? TryRun(Action setup)
+    {
+        ArgumentNullException.ThrowIfNull(setup);
+        if (IsFailed)
+        {
+            return null;
+        }
+
+        try
+        {
+            setup();
+            return null;
+        }
+        catch (Exception exception)
+        {
+            IsFailed = true;
+            return exception;
+        }
+    }
+
+    public void Reset()
+    {
+        IsFailed = false;
+    }
+}

@@ -26,6 +26,7 @@ internal static partial class NeonLetterMultiplayerRuntime
     private const string SnapshotFrameEventId =
         "SOTFNeonLetters.ColorSnapshotFrame.v1";
     private const int MaxPendingColorItemsPerTick = 16;
+    private const byte ClientDisconnectKey = 0;
     private const double PendingColorLifetimeSeconds = 15d;
     private static readonly NeonLetterAuthoritativeColors<ulong> AuthoritativeColors =
         new();
@@ -56,9 +57,13 @@ internal static partial class NeonLetterMultiplayerRuntime
     private static readonly NeonLetterHelloScheduler HelloScheduler = new(
         NeonLetterSessionProtocol.HelloResendIntervalSeconds,
         NeonLetterSessionProtocol.NegotiationTimeoutSeconds);
+    private static readonly NeonLetterRoleSetupGate RoleSetupGate = new();
     private static readonly HashSet<BoltConnection> HostConnections =
         new();
-    private static readonly HashSet<BoltConnection> DeferredDisconnects = new();
+    private static readonly NeonLetterDeferredDisconnects<BoltConnection>
+        DeferredDisconnects = new();
+    private static readonly NeonLetterDeferredDisconnects<byte>
+        DeferredClientDisconnects = new();
     private static readonly NeonLetterClientSessionGate ClientSession = new();
     private static readonly Func<ulong, bool> IsLiveLetterIdentityCallback =
         IsLiveLetterIdentity;
@@ -83,7 +88,6 @@ internal static partial class NeonLetterMultiplayerRuntime
     private static bool _snapshotFrameRegistered;
     private static NeonLetterSessionIdentity? _sessionIdentity;
     private static NeonLetterHandshakeRegistry<BoltConnection> _hostHandshakes;
-    private static bool _clientDisconnectDeferred;
     private static ulong _nextHelloId = 1;
     private static ulong _clientHelloId;
     private static bool _roleReady;
@@ -152,6 +156,28 @@ internal static partial class NeonLetterMultiplayerRuntime
     }
 
     private static void RegisterHandlersForCurrentRole()
+    {
+        Exception failure =
+            RoleSetupGate.TryRun(RegisterHandlersForCurrentRoleCore);
+        if (failure == null)
+        {
+            return;
+        }
+
+        UnregisterRoleHandlers();
+        try
+        {
+            RLog.Error(
+                $"[SOTFNeonLetters] Failed to initialize multiplayer " +
+                $"session; setup disabled until lifecycle reset: {failure}");
+        }
+        catch
+        {
+            // Role setup must remain non-throwing for SDK event callbacks.
+        }
+    }
+
+    private static void RegisterHandlersForCurrentRoleCore()
     {
         if (!BoltNetwork.isRunning)
         {
@@ -979,12 +1005,13 @@ internal static partial class NeonLetterMultiplayerRuntime
         NeonRgba color,
         bool protocolAccepted)
     {
-        if (HostApplyCoordinator.TryGetCached(
+        if (HostApplyCoordinator.TryResolveReplay(
                 fromConnection,
                 requestId,
-                out NeonLetterApplyResult<ulong> cached))
+                networkId.PackedValue,
+                out NeonLetterApplyResult<ulong> replay))
         {
-            TrySendColorResult(cached, fromConnection);
+            TrySendColorResult(replay, fromConnection);
             return;
         }
 
@@ -1131,17 +1158,35 @@ internal static partial class NeonLetterMultiplayerRuntime
             return;
         }
 
-        BoltNetwork.clients.ForEach((Action<BoltConnection>)(connection =>
+        var connections = new List<BoltConnection>();
+        BoltNetwork.clients.ForEach(
+            (Action<BoltConnection>)(connection => connections.Add(connection)));
+        NeonLetterPeerDelivery.Deliver(
+            connections,
+            _hostHandshakes.IsAccepted,
+            connection => ColorState.SendToClient(
+                networkId,
+                color,
+                revision,
+                connection),
+            ScheduleFailedColorStateConnection);
+    }
+
+    private static void ScheduleFailedColorStateConnection(
+        BoltConnection connection,
+        Exception exception)
+    {
+        DeferredDisconnects.Schedule(connection);
+        try
         {
-            if (_hostHandshakes.IsAccepted(connection))
-            {
-                ColorState.SendToClient(
-                    networkId,
-                    color,
-                    revision,
-                    connection);
-            }
-        }));
+            RLog.Error(
+                $"[SOTFNeonLetters] Failed to send {ColorState.Id} to " +
+                $"{connection.ConnectionId}; disconnect scheduled: {exception}");
+        }
+        catch
+        {
+            // A logging failure must not block delivery to later peers.
+        }
     }
 
     private static bool TryResolveLiveLetter(

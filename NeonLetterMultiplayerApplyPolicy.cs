@@ -56,10 +56,14 @@ internal sealed class NeonLetterHostApplyCoordinator<TPeer, TKey>
         int recipeId,
         NeonRgba color)
     {
-        if (TryGetCached(peer, requestId, out NeonLetterApplyResult<TKey> cached))
+        if (TryResolveReplay(
+                peer,
+                requestId,
+                identity,
+                out NeonLetterApplyResult<TKey> replay))
         {
             return new NeonLetterHostApplyOutcome<TKey>(
-                cached,
+                replay,
                 ShouldBroadcast: false);
         }
 
@@ -92,9 +96,10 @@ internal sealed class NeonLetterHostApplyCoordinator<TPeer, TKey>
             ShouldBroadcast: acceptance.Accepted);
     }
 
-    public bool TryGetCached(
+    public bool TryResolveReplay(
         TPeer peer,
         ulong requestId,
+        TKey identity,
         out NeonLetterApplyResult<TKey> result)
     {
         if (requestId == 0)
@@ -105,7 +110,23 @@ internal sealed class NeonLetterHostApplyCoordinator<TPeer, TKey>
 
         if (_peerCaches.TryGetValue(peer, out PeerRequestCache? cache))
         {
-            return cache.TryGet(requestId, out result);
+            if (cache.TryGet(requestId, out result))
+            {
+                return true;
+            }
+
+            if (requestId <= cache.HighWatermark)
+            {
+                NeonLetterAuthoritativeColor authoritative =
+                    _authoritative.ResolveState(identity);
+                result = new NeonLetterApplyResult<TKey>(
+                    requestId,
+                    identity,
+                    NeonLetterApplyStatus.Rejected,
+                    authoritative.Color,
+                    authoritative.Revision);
+                return true;
+            }
         }
 
         result = default;
@@ -143,6 +164,8 @@ internal sealed class NeonLetterHostApplyCoordinator<TPeer, TKey>
         private readonly Queue<ulong> _requestOrder = new(
             NeonLetterHostApplyProtocol.MaxCachedRequestsPerPeer);
 
+        public ulong HighWatermark { get; private set; }
+
         public bool TryGet(
             ulong requestId,
             out NeonLetterApplyResult<TKey> result)
@@ -156,6 +179,7 @@ internal sealed class NeonLetterHostApplyCoordinator<TPeer, TKey>
         {
             _results.Add(requestId, result);
             _requestOrder.Enqueue(requestId);
+            HighWatermark = requestId;
             if (_results.Count <=
                 NeonLetterHostApplyProtocol.MaxCachedRequestsPerPeer)
             {

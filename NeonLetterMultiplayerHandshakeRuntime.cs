@@ -15,7 +15,7 @@ internal static partial class NeonLetterMultiplayerRuntime
     {
         if (!BoltNetwork.isRunning)
         {
-            if (_roleReady)
+            if (_roleReady || RoleSetupGate.IsFailed)
             {
                 UnregisterRoleHandlers();
                 ClearSessionState();
@@ -26,15 +26,9 @@ internal static partial class NeonLetterMultiplayerRuntime
 
         if (!_roleReady)
         {
-            try
+            RegisterHandlersForCurrentRole();
+            if (!_roleReady)
             {
-                RegisterHandlersForCurrentRole();
-            }
-            catch (Exception exception)
-            {
-                RLog.Error(
-                    $"[SOTFNeonLetters] Failed to initialize multiplayer " +
-                    $"session: {exception}");
                 return;
             }
         }
@@ -91,7 +85,7 @@ internal static partial class NeonLetterMultiplayerRuntime
                 helloId: 0,
                 NeonLetterHandshakeStatus.MissingHello,
                 connection);
-            DeferredDisconnects.Add(connection);
+            DeferredDisconnects.Schedule(connection);
             RLog.Error(
                 $"[SOTFNeonLetters] Rejected multiplayer client " +
                 $"{connection.ConnectionId}: handshake hello was not received within " +
@@ -101,7 +95,8 @@ internal static partial class NeonLetterMultiplayerRuntime
 
     private static void AdvanceClientHandshake(double nowSeconds)
     {
-        if (ClientSession.IsAccepted || _clientDisconnectDeferred)
+        if (ClientSession.IsAccepted ||
+            DeferredClientDisconnects.Contains(ClientDisconnectKey))
         {
             return;
         }
@@ -111,7 +106,7 @@ internal static partial class NeonLetterMultiplayerRuntime
             RLog.Error(
                 $"[SOTFNeonLetters] Multiplayer handshake timed out after " +
                 $"{NeonLetterSessionProtocol.NegotiationTimeoutSeconds:0} seconds.");
-            _clientDisconnectDeferred = true;
+            DeferredClientDisconnects.Schedule(ClientDisconnectKey);
             return;
         }
 
@@ -137,40 +132,45 @@ internal static partial class NeonLetterMultiplayerRuntime
 
     private static void DrainDeferredDisconnects()
     {
-        if (_clientDisconnectDeferred &&
-            BoltNetwork.server != null)
+        DeferredClientDisconnects.Drain(
+            exists: _ => BoltNetwork.server != null,
+            execute: _ => BoltNetwork.server.Disconnect(),
+            onFirstFailure: LogClientDisconnectFailure);
+        DeferredDisconnects.Drain(
+            HostConnections.Contains,
+            connection => connection.Disconnect(),
+            LogHostDisconnectFailure);
+    }
+
+    private static void LogClientDisconnectFailure(
+        byte _,
+        Exception exception)
+    {
+        try
         {
-            _clientDisconnectDeferred = false;
-            try
-            {
-                BoltNetwork.server.Disconnect();
-            }
-            catch (Exception exception)
-            {
-                RLog.Error(
-                    $"[SOTFNeonLetters] Failed to disconnect rejected " +
-                    $"multiplayer session: {exception}");
-            }
+            RLog.Error(
+                $"[SOTFNeonLetters] Failed to disconnect rejected " +
+                $"multiplayer session; retry scheduled: {exception}");
         }
-
-        foreach (BoltConnection connection in DeferredDisconnects.ToArray())
+        catch
         {
-            DeferredDisconnects.Remove(connection);
-            if (!HostConnections.Contains(connection))
-            {
-                continue;
-            }
+            // A logging failure must not cancel the deferred retry.
+        }
+    }
 
-            try
-            {
-                connection.Disconnect();
-            }
-            catch (Exception exception)
-            {
-                RLog.Error(
-                    $"[SOTFNeonLetters] Failed to disconnect rejected client " +
-                    $"{connection.ConnectionId}: {exception}");
-            }
+    private static void LogHostDisconnectFailure(
+        BoltConnection connection,
+        Exception exception)
+    {
+        try
+        {
+            RLog.Error(
+                $"[SOTFNeonLetters] Failed to disconnect rejected client " +
+                $"{connection.ConnectionId}; retry scheduled: {exception}");
+        }
+        catch
+        {
+            // A logging failure must not block retries for later peers.
         }
     }
 
@@ -217,7 +217,7 @@ internal static partial class NeonLetterMultiplayerRuntime
             return;
         }
 
-        DeferredDisconnects.Add(fromConnection);
+        DeferredDisconnects.Schedule(fromConnection);
         RLog.Error(
             $"[SOTFNeonLetters] Rejected multiplayer client {connectionId}: " +
             $"{FormatHandshakeStatus(status)}.");
@@ -233,7 +233,7 @@ internal static partial class NeonLetterMultiplayerRuntime
             helloId: 0,
             NeonLetterHandshakeStatus.MalformedHello,
             fromConnection);
-        DeferredDisconnects.Add(fromConnection);
+        DeferredDisconnects.Schedule(fromConnection);
         RLog.Error(
             $"[SOTFNeonLetters] Rejected multiplayer client {connectionId}: " +
             "malformed handshake hello.");
@@ -270,7 +270,7 @@ internal static partial class NeonLetterMultiplayerRuntime
 
         ClientSession.Reject();
         HelloScheduler.Clear();
-        _clientDisconnectDeferred = true;
+        DeferredClientDisconnects.Schedule(ClientDisconnectKey);
         RLog.Error(
             $"[SOTFNeonLetters] Multiplayer protocol handshake rejected: " +
             $"{FormatHandshakeStatus(status)}.");
@@ -405,8 +405,8 @@ internal static partial class NeonLetterMultiplayerRuntime
 
         HostConnections.Clear();
         DeferredDisconnects.Clear();
+        DeferredClientDisconnects.Clear();
         HelloScheduler.Clear();
-        _clientDisconnectDeferred = false;
         _clientHelloId = 0;
         _roleReady = false;
         SnapshotRequestScheduler.Rearm();
@@ -419,6 +419,7 @@ internal static partial class NeonLetterMultiplayerRuntime
         ResetRoleSession();
         _hostHandshakes = null;
         _sessionIdentity = null;
+        RoleSetupGate.Reset();
     }
 
     private static string FormatHandshakeStatus(
