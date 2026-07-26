@@ -101,7 +101,7 @@ internal static partial class NeonLetterMultiplayerRuntime
 
     private static void AdvanceClientHandshake(double nowSeconds)
     {
-        if (_clientHandshakeAccepted || _clientDisconnectDeferred)
+        if (ClientSession.IsAccepted || _clientDisconnectDeferred)
         {
             return;
         }
@@ -260,7 +260,7 @@ internal static partial class NeonLetterMultiplayerRuntime
 
         if (status == NeonLetterHandshakeStatus.Accepted)
         {
-            _clientHandshakeAccepted = true;
+            ClientSession.Accept();
             HelloScheduler.Clear();
             RLog.Msg(
                 "[SOTFNeonLetters] Multiplayer protocol handshake accepted.");
@@ -268,7 +268,7 @@ internal static partial class NeonLetterMultiplayerRuntime
             return;
         }
 
-        _clientHandshakeAccepted = false;
+        ClientSession.Reject();
         HelloScheduler.Clear();
         _clientDisconnectDeferred = true;
         RLog.Error(
@@ -376,15 +376,36 @@ internal static partial class NeonLetterMultiplayerRuntime
             NeonLetterSessionProtocol.NegotiationTimeoutSeconds);
     }
 
+    private static void BeginRoleSession()
+    {
+        ResetRoleSession(beginClientSession: true);
+    }
+
     private static void ResetRoleSession()
+    {
+        ResetRoleSession(beginClientSession: false);
+    }
+
+    private static void ResetRoleSession(bool beginClientSession)
     {
         _hostHandshakes?.Clear();
         HostApplyCoordinator.Clear();
-        ClientApplyCoordinator.Clear();
+        if (beginClientSession)
+        {
+            ClientSession.BeginSession(
+                ReplicatedState.Clear,
+                ClientApplyCoordinator.Clear);
+        }
+        else
+        {
+            ClientSession.Clear(
+                ReplicatedState.Clear,
+                ClientApplyCoordinator.Clear);
+        }
+
         HostConnections.Clear();
         DeferredDisconnects.Clear();
         HelloScheduler.Clear();
-        _clientHandshakeAccepted = false;
         _clientDisconnectDeferred = false;
         _clientHelloId = 0;
         _roleReady = false;

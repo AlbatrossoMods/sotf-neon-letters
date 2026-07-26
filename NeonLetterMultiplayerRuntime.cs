@@ -59,6 +59,7 @@ internal static partial class NeonLetterMultiplayerRuntime
     private static readonly HashSet<BoltConnection> HostConnections =
         new();
     private static readonly HashSet<BoltConnection> DeferredDisconnects = new();
+    private static readonly NeonLetterClientSessionGate ClientSession = new();
     private static readonly Func<ulong, bool> IsLiveLetterIdentityCallback =
         IsLiveLetterIdentity;
     private static readonly Func<NeonLetterSnapshotEntry[]>
@@ -82,7 +83,6 @@ internal static partial class NeonLetterMultiplayerRuntime
     private static bool _snapshotFrameRegistered;
     private static NeonLetterSessionIdentity? _sessionIdentity;
     private static NeonLetterHandshakeRegistry<BoltConnection> _hostHandshakes;
-    private static bool _clientHandshakeAccepted;
     private static bool _clientDisconnectDeferred;
     private static ulong _nextHelloId = 1;
     private static ulong _clientHelloId;
@@ -145,8 +145,6 @@ internal static partial class NeonLetterMultiplayerRuntime
                 exception));
         AuthoritativeColors.Clear();
         HostApplyCoordinator.Clear();
-        ClientApplyCoordinator.Clear();
-        ReplicatedState.Clear();
         SnapshotRequestScheduler.Rearm();
         SnapshotBatchCoordinator.Reset();
         SnapshotSendCoordinator.Clear();
@@ -162,8 +160,8 @@ internal static partial class NeonLetterMultiplayerRuntime
             return;
         }
 
+        BeginRoleSession();
         EnsureSessionIdentity();
-        ResetRoleSession();
         if (NetUtils.IsServer)
         {
             // Unknown event IDs are dropped before Packets.HandlePacket relays
@@ -354,7 +352,6 @@ internal static partial class NeonLetterMultiplayerRuntime
         finally
         {
             _changeResultRegistered = false;
-            ClientApplyCoordinator.Clear();
         }
     }
 
@@ -389,7 +386,7 @@ internal static partial class NeonLetterMultiplayerRuntime
         finally
         {
             _handshakeResultRegistered = false;
-            _clientHandshakeAccepted = false;
+            ClientSession.Reject();
             HelloScheduler.Clear();
         }
     }
@@ -463,7 +460,7 @@ internal static partial class NeonLetterMultiplayerRuntime
                 return false;
             }
 
-            if (!_clientHandshakeAccepted)
+            if (!ClientSession.IsAccepted)
             {
                 return false;
             }
@@ -540,7 +537,7 @@ internal static partial class NeonLetterMultiplayerRuntime
             !BoltNetwork.isRunning ||
             !NetUtils.IsClient ||
             NetUtils.IsServer ||
-            !_clientHandshakeAccepted ||
+            !ClientSession.IsAccepted ||
             !SnapshotRequestScheduler.CanAttempt)
         {
             return;
@@ -594,7 +591,7 @@ internal static partial class NeonLetterMultiplayerRuntime
         UdpPacket packet,
         BoltConnection fromConnection)
     {
-        if (!_clientHandshakeAccepted || !IsStateFromHost(fromConnection))
+        if (!ClientSession.IsAccepted || !IsStateFromHost(fromConnection))
         {
             return;
         }
@@ -632,7 +629,7 @@ internal static partial class NeonLetterMultiplayerRuntime
         UdpPacket packet,
         BoltConnection fromConnection)
     {
-        if (!_clientHandshakeAccepted || !IsStateFromHost(fromConnection))
+        if (!ClientSession.IsAccepted || !IsStateFromHost(fromConnection))
         {
             return;
         }
@@ -727,7 +724,7 @@ internal static partial class NeonLetterMultiplayerRuntime
         UdpPacket packet,
         BoltConnection fromConnection)
     {
-        if (!_clientHandshakeAccepted || !IsStateFromHost(fromConnection))
+        if (!ClientSession.IsAccepted || !IsStateFromHost(fromConnection))
         {
             return;
         }
@@ -789,6 +786,11 @@ internal static partial class NeonLetterMultiplayerRuntime
     private static void PublishSnapshotBatch(
         IReadOnlyList<NeonLetterSnapshotEntry> entries)
     {
+        if (!ClientSession.IsAccepted)
+        {
+            return;
+        }
+
         foreach (NeonLetterSnapshotEntry entry in entries)
         {
             ClientApplyCoordinator.SeedAuthoritative(
@@ -883,7 +885,7 @@ internal static partial class NeonLetterMultiplayerRuntime
         if (BoltNetwork.isRunning &&
             NetUtils.IsClient &&
             !NetUtils.IsServer &&
-            _clientHandshakeAccepted)
+            ClientSession.IsAccepted)
         {
             foreach (NeonLetterClientApplyDecision<ulong> decision in
                 ClientApplyCoordinator.RejectTimedOut(
@@ -896,6 +898,7 @@ internal static partial class NeonLetterMultiplayerRuntime
         if (!BoltNetwork.isRunning ||
             !NetUtils.IsClient ||
             NetUtils.IsServer ||
+            !ClientSession.IsAccepted ||
             ReplicatedState.PendingCount == 0)
         {
             return;
@@ -922,7 +925,6 @@ internal static partial class NeonLetterMultiplayerRuntime
     {
         UnregisterRoleHandlers();
         AuthoritativeColors.Clear();
-        ReplicatedState.Clear();
         SnapshotRequestScheduler.Rearm();
         SnapshotBatchCoordinator.Reset();
         SnapshotSendCoordinator.Clear();
@@ -940,6 +942,11 @@ internal static partial class NeonLetterMultiplayerRuntime
 
     private static void ApplyReplicatedColor(ulong identity, NeonRgba color)
     {
+        if (!ClientSession.IsAccepted)
+        {
+            return;
+        }
+
         if (!TryResolveLiveLetterIdentity(
                 identity,
                 out _,
@@ -1051,17 +1058,18 @@ internal static partial class NeonLetterMultiplayerRuntime
     private static void ApplyClientDecision(
         NeonLetterClientApplyDecision<ulong> decision)
     {
-        if (decision.Action == NeonLetterClientApplyAction.Ignored)
+        if (decision.Action == NeonLetterClientApplyAction.Ignored ||
+            !ClientSession.IsAccepted)
         {
             return;
         }
 
-        ReplicatedState.Receive(
+        ClientSession.TryRun(() => ReplicatedState.Receive(
             decision.Identity,
             decision.Color,
             Time.realtimeSinceStartupAsDouble,
             IsLiveLetterIdentityCallback,
-            ApplyReplicatedColorCallback);
+            ApplyReplicatedColorCallback));
     }
 
     private static bool AcceptHostColor(NetworkId networkId, NeonRgba color)

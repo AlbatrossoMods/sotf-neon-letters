@@ -137,6 +137,52 @@ public sealed class MultiplayerSessionProtocolTests
     }
 
     [Fact]
+    public void ReconnectClearsOldClientStateAndUnknownTicksCannotApply()
+    {
+        var session = new NeonLetterClientSessionGate();
+        var replicated = new NeonLetterReplicatedColorState<int>(
+            pendingCapacity: 4,
+            pendingLifetimeSeconds: 5d);
+        var clientApply = new NeonLetterClientApplyCoordinator<int>(
+            timeoutSeconds: 5d);
+        int appliedAfterReconnect = 0;
+        session.BeginSession(replicated.Clear, clientApply.Clear);
+        session.Accept();
+        session.TryRun(() => replicated.Receive(
+            identity: 7,
+            Red,
+            nowSeconds: 0d,
+            isReady: _ => false,
+            apply: (_, _) => { }));
+        clientApply.AcceptLive(8, Blue, revision: 4);
+
+        session.BeginSession(replicated.Clear, clientApply.Clear);
+        bool receiveRan = session.TryRun(() => replicated.Receive(
+            identity: 7,
+            Green,
+            nowSeconds: 1d,
+            isReady: _ => true,
+            apply: (_, _) => appliedAfterReconnect++));
+        bool drainRan = session.TryRun(() => replicated.DrainReady(
+            nowSeconds: 1d,
+            isReady: _ => true,
+            apply: (_, _) => appliedAfterReconnect++));
+        session.Clear(replicated.Clear, clientApply.Clear);
+        session.Clear(replicated.Clear, clientApply.Clear);
+
+        Assert.Equal(
+            (false, 2ul, false, false, 0, 0, NeonRgba.ProjectCyan),
+            (
+                session.IsAccepted,
+                session.Epoch,
+                receiveRan,
+                drainRan,
+                replicated.PendingCount,
+                appliedAfterReconnect,
+                clientApply.ResolveAuthoritative(8).Color));
+    }
+
+    [Fact]
     public void MalformedTrafficForcesAnAcceptedPeerToRejected()
     {
         NeonLetterSessionIdentity identity = CreateIdentity();
@@ -349,6 +395,122 @@ public sealed class MultiplayerSessionProtocolTests
                 repeated.ShouldBroadcast,
                 authoritative.ResolveState(7).Revision,
                 authoritative.Resolve(8)));
+    }
+
+    [Fact]
+    public void HostDedupeEvictsTheOldestRequestAtItsPerPeerCapacity()
+    {
+        const int capacity =
+            NeonLetterHostApplyProtocol.MaxCachedRequestsPerPeer;
+        var authoritative = new NeonLetterAuthoritativeColors<int>();
+        var coordinator =
+            new NeonLetterHostApplyCoordinator<string, int>(authoritative);
+        for (ulong requestId = 1;
+             requestId <= (ulong)capacity + 1;
+             requestId++)
+        {
+            coordinator.Process(
+                "peer",
+                requestId,
+                identity: 7,
+                isHost: true,
+                isLive: true,
+                recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+                Red);
+        }
+
+        NeonLetterHostApplyOutcome<int> replayed = coordinator.Process(
+            "peer",
+            requestId: 1,
+            identity: 7,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Blue);
+
+        Assert.Equal(
+            (true, (ulong)capacity + 2),
+            (replayed.ShouldBroadcast, replayed.Result.Revision));
+    }
+
+    [Fact]
+    public void HostDedupeKeepsRecentDuplicatesAndClearsOnePeer()
+    {
+        var authoritative = new NeonLetterAuthoritativeColors<int>();
+        var coordinator =
+            new NeonLetterHostApplyCoordinator<string, int>(authoritative);
+        NeonLetterHostApplyOutcome<int> first = coordinator.Process(
+            "peer",
+            requestId: 1,
+            identity: 7,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Red);
+        NeonLetterHostApplyOutcome<int> duplicate = coordinator.Process(
+            "peer",
+            requestId: 1,
+            identity: 8,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[1].RecipeId,
+            Blue);
+        coordinator.Remove("peer");
+        NeonLetterHostApplyOutcome<int> afterCleanup = coordinator.Process(
+            "peer",
+            requestId: 1,
+            identity: 7,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Green);
+
+        Assert.Equal(
+            (first.Result, false, true, 2ul),
+            (
+                duplicate.Result,
+                duplicate.ShouldBroadcast,
+                afterCleanup.ShouldBroadcast,
+                afterCleanup.Result.Revision));
+    }
+
+    [Fact]
+    public void AuthoritativeRevisionsAdvanceIndependentlyPerEntity()
+    {
+        var authoritative = new NeonLetterAuthoritativeColors<int>();
+
+        NeonLetterColorAcceptance firstA = authoritative.TryAccept(
+            isHost: true,
+            identity: 7,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Red);
+        NeonLetterColorAcceptance firstB = authoritative.TryAccept(
+            isHost: true,
+            identity: 8,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[1].RecipeId,
+            Blue);
+        NeonLetterColorAcceptance secondA = authoritative.TryAccept(
+            isHost: true,
+            identity: 7,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Green);
+        NeonLetterColorAcceptance rejectedB = authoritative.TryAccept(
+            isHost: true,
+            identity: 8,
+            isLive: false,
+            recipeId: NeonLetterSmallCatalog.All[1].RecipeId,
+            Red);
+
+        Assert.Equal(
+            (1ul, 1ul, 2ul, 1ul),
+            (
+                firstA.Revision,
+                firstB.Revision,
+                secondA.Revision,
+                rejectedB.Revision));
     }
 
     [Fact]

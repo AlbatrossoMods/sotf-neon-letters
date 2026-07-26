@@ -34,7 +34,6 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
 {
     private readonly Dictionary<TKey, NeonLetterAuthoritativeColor> _colors =
         new();
-    private ulong _revision;
 
     public NeonLetterColorAcceptance TryAccept(
         bool isHost,
@@ -56,13 +55,14 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
         NeonRgba canonicalColor = NeonLetterNetworkProtocol.Unpack(
             NeonLetterNetworkProtocol.CurrentVersion,
             packedColor);
-        if (_revision == ulong.MaxValue)
+        NeonLetterAuthoritativeColor currentState = ResolveState(identity);
+        if (currentState.Revision == ulong.MaxValue)
         {
             throw new InvalidOperationException(
                 "The authoritative color revision space is exhausted.");
         }
 
-        ulong revision = ++_revision;
+        ulong revision = currentState.Revision + 1;
         _colors[identity] = new NeonLetterAuthoritativeColor(
             canonicalColor,
             revision);
@@ -130,7 +130,6 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
     public void Clear()
     {
         _colors.Clear();
-        _revision = 0;
     }
 
     private static bool IsKnownRecipe(int recipeId)

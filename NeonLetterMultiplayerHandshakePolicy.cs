@@ -216,6 +216,67 @@ internal enum NeonLetterPeerState : byte
     Rejected
 }
 
+internal sealed class NeonLetterClientSessionGate
+{
+    public ulong Epoch { get; private set; }
+    public bool IsAccepted { get; private set; }
+
+    public void BeginSession(
+        Action clearReplicatedState,
+        Action clearApplyState)
+    {
+        ArgumentNullException.ThrowIfNull(clearReplicatedState);
+        ArgumentNullException.ThrowIfNull(clearApplyState);
+        if (Epoch == ulong.MaxValue)
+        {
+            throw new InvalidOperationException(
+                "The client multiplayer session epoch space is exhausted.");
+        }
+
+        Epoch++;
+        Clear(clearReplicatedState, clearApplyState);
+    }
+
+    public void Clear(
+        Action clearReplicatedState,
+        Action clearApplyState)
+    {
+        ArgumentNullException.ThrowIfNull(clearReplicatedState);
+        ArgumentNullException.ThrowIfNull(clearApplyState);
+        IsAccepted = false;
+        try
+        {
+            clearReplicatedState();
+        }
+        finally
+        {
+            clearApplyState();
+        }
+    }
+
+    public void Accept()
+    {
+        IsAccepted = true;
+    }
+
+    public void Reject()
+    {
+        IsAccepted = false;
+    }
+
+    public bool TryRun(Action action)
+    {
+        ArgumentNullException.ThrowIfNull(action);
+        if (!IsAccepted)
+        {
+            return false;
+        }
+
+        action();
+        return true;
+    }
+}
+
 internal readonly record struct NeonLetterHandshakeHello(
     ulong HelloId,
     NeonLetterSessionFingerprint Fingerprint)

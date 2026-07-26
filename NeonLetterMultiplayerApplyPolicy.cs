@@ -2,6 +2,11 @@
 
 namespace SOTFNeonLetters;
 
+internal static class NeonLetterHostApplyProtocol
+{
+    public const int MaxCachedRequestsPerPeer = 256;
+}
+
 internal enum NeonLetterApplyStatus : byte
 {
     Accepted,
@@ -33,9 +38,7 @@ internal sealed class NeonLetterHostApplyCoordinator<TPeer, TKey>
     where TKey : notnull
 {
     private readonly NeonLetterAuthoritativeColors<TKey> _authoritative;
-    private readonly Dictionary<
-        (TPeer Peer, ulong RequestId),
-        NeonLetterApplyResult<TKey>> _results = new();
+    private readonly Dictionary<TPeer, PeerRequestCache> _peerCaches = new();
 
     public NeonLetterHostApplyCoordinator(
         NeonLetterAuthoritativeColors<TKey> authoritative)
@@ -53,10 +56,7 @@ internal sealed class NeonLetterHostApplyCoordinator<TPeer, TKey>
         int recipeId,
         NeonRgba color)
     {
-        if (requestId != 0 &&
-            _results.TryGetValue(
-                (peer, requestId),
-                out NeonLetterApplyResult<TKey> cached))
+        if (TryGetCached(peer, requestId, out NeonLetterApplyResult<TKey> cached))
         {
             return new NeonLetterHostApplyOutcome<TKey>(
                 cached,
@@ -84,7 +84,7 @@ internal sealed class NeonLetterHostApplyCoordinator<TPeer, TKey>
             acceptance.Revision);
         if (requestId != 0)
         {
-            _results.Add((peer, requestId), result);
+            GetOrCreateCache(peer).Add(requestId, result);
         }
 
         return new NeonLetterHostApplyOutcome<TKey>(
@@ -103,23 +103,68 @@ internal sealed class NeonLetterHostApplyCoordinator<TPeer, TKey>
             return false;
         }
 
-        return _results.TryGetValue((peer, requestId), out result);
+        if (_peerCaches.TryGetValue(peer, out PeerRequestCache? cache))
+        {
+            return cache.TryGet(requestId, out result);
+        }
+
+        result = default;
+        return false;
     }
 
     public void Remove(TPeer peer)
     {
-        var keys = _results.Keys
-            .Where(key => EqualityComparer<TPeer>.Default.Equals(key.Peer, peer))
-            .ToArray();
-        foreach ((TPeer Peer, ulong RequestId) key in keys)
-        {
-            _results.Remove(key);
-        }
+        _peerCaches.Remove(peer);
     }
 
     public void Clear()
     {
-        _results.Clear();
+        _peerCaches.Clear();
+    }
+
+    private PeerRequestCache GetOrCreateCache(TPeer peer)
+    {
+        if (_peerCaches.TryGetValue(peer, out PeerRequestCache? cache))
+        {
+            return cache;
+        }
+
+        cache = new PeerRequestCache();
+        _peerCaches.Add(peer, cache);
+        return cache;
+    }
+
+    private sealed class PeerRequestCache
+    {
+        private readonly Dictionary<
+            ulong,
+            NeonLetterApplyResult<TKey>> _results = new(
+                NeonLetterHostApplyProtocol.MaxCachedRequestsPerPeer);
+        private readonly Queue<ulong> _requestOrder = new(
+            NeonLetterHostApplyProtocol.MaxCachedRequestsPerPeer);
+
+        public bool TryGet(
+            ulong requestId,
+            out NeonLetterApplyResult<TKey> result)
+        {
+            return _results.TryGetValue(requestId, out result);
+        }
+
+        public void Add(
+            ulong requestId,
+            NeonLetterApplyResult<TKey> result)
+        {
+            _results.Add(requestId, result);
+            _requestOrder.Enqueue(requestId);
+            if (_results.Count <=
+                NeonLetterHostApplyProtocol.MaxCachedRequestsPerPeer)
+            {
+                return;
+            }
+
+            ulong evictedRequestId = _requestOrder.Dequeue();
+            _results.Remove(evictedRequestId);
+        }
     }
 }
 
