@@ -484,7 +484,10 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
                 $"Bolt failed to instantiate neon recipe {entry.RecipeId}.");
         }
 
-        return new RestoreTarget(spawnedEntity, RollbackFallback);
+        return new RestoreTarget(
+            spawnedEntity,
+            RollbackFallback,
+            DestroyLocalFallback);
     }
 
     private static bool ApplyRestoredColor(
@@ -533,6 +536,14 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         BoltNetwork.Destroy(entity);
     }
 
+    private static void DestroyLocalFallback(BoltEntity entity)
+    {
+        if (entity != null)
+        {
+            UnityEngine.Object.Destroy(entity.gameObject);
+        }
+    }
+
     private RestoreTarget ResolveNativeTarget(BoltEntity entity)
     {
         int instanceId = entity.GetInstanceID();
@@ -551,31 +562,35 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
     private sealed class RestoreTarget : IDisposable
     {
-        private Action<BoltEntity> _rollback;
+        private readonly NeonLetterFallbackRollbackAdapter<BoltEntity>
+            _rollback;
 
         public RestoreTarget(
             BoltEntity entity,
-            Action<BoltEntity> rollback = null)
+            Action<BoltEntity> destroyOverNetwork = null,
+            Action<BoltEntity> destroyLocally = null)
         {
             Entity = entity;
-            _rollback = rollback;
+            if (destroyOverNetwork != null)
+            {
+                _rollback =
+                    new NeonLetterFallbackRollbackAdapter<BoltEntity>(
+                        entity,
+                        target => target != null,
+                        target => target.isAttached,
+                        target => !target.networkId.IsZero,
+                        destroyOverNetwork,
+                        destroyLocally ??
+                        throw new ArgumentNullException(
+                            nameof(destroyLocally)));
+            }
         }
 
         public BoltEntity Entity { get; }
 
         public void Dispose()
         {
-            Action<BoltEntity> rollback =
-                Interlocked.Exchange(ref _rollback, null);
-            if (rollback == null ||
-                Entity == null ||
-                !Entity.isAttached ||
-                Entity.networkId.IsZero)
-            {
-                return;
-            }
-
-            rollback(Entity);
+            _rollback?.Dispose();
         }
 
         public bool Matches(BoltEntity entity)

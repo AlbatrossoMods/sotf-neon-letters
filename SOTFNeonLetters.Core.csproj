@@ -18,6 +18,7 @@
         <Compile Include="NeonLetterReentrantSnapshotPool.cs" />
         <Compile Include="NeonLetterMultiplayerState.cs" />
         <Compile Include="NeonLetterMultiplayerPersistencePolicy.cs" />
+        <Compile Include="NeonLetterFallbackRollbackPolicy.cs" />
         <Compile Include="NeonLetterSnapshotRequestScheduler.cs" />
         <Compile Include="NeonLetterSnapshotBatchCoordinator.cs" />
         <Compile Include="NeonLetterColorPersistencePolicy.cs" />
