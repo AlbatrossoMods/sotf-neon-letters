@@ -108,8 +108,23 @@ public sealed class RestoreWorkOwnershipTests
         Task resetWork = Task.Run(
             () =>
             {
+                NeonLetterRestoreResetRequest request =
+                    ownership.GetResetRequest(reset);
                 coordinator.Clear();
-                ownership.CompleteReset(reset);
+                Assert.False(
+                    ownership.TryCompleteReset(
+                        reset,
+                        request.Version,
+                        rollbackSatisfied: true,
+                        out request,
+                        out _));
+                Assert.True(
+                    ownership.TryCompleteReset(
+                        reset,
+                        request.Version,
+                        rollbackSatisfied: true,
+                        out _,
+                        out _));
             });
         Assert.True(callbackBarrier.SignalAndWait(TestTimeout));
         bool signalled = false;
@@ -185,8 +200,13 @@ public sealed class RestoreWorkOwnershipTests
             ownership.CompleteUpdate(update, out var reset);
         NeonLetterRestoreResetRequest transferredRequest =
             ownership.GetResetRequest(reset);
-        NeonLetterRestoreResetCompletion completion =
-            ownership.CompleteReset(reset);
+        Assert.True(
+            ownership.TryCompleteReset(
+                reset,
+                transferredRequest.Version,
+                rollbackSatisfied: true,
+                out _,
+                out NeonLetterRestoreResetCompletion completion));
 
         Assert.Equal(
             (false, true, false, true, true, true, false, false, 1, 0),
@@ -252,6 +272,201 @@ public sealed class RestoreWorkOwnershipTests
             (signalled, coordinator.PendingCount));
     }
 
+    [Fact]
+    public async Task WeakResetUpgradeRollsBackDetachedFallbackExactlyOnceAsync()
+    {
+        var ownership = new NeonLetterRestoreWorkOwnership();
+        Assert.True(
+            ownership.RequestReset(
+                rollbackOwnedFallbacks: false,
+                resumeLoads: true,
+                out var reset));
+        int rollbackCount = 0;
+        NeonLetterMultiplayerRestoreCoordinator<DisposableTarget> coordinator =
+            CreateOwnedFallbackCoordinator(() => rollbackCount++);
+        using var detachedBarrier = new Barrier(2);
+        using var releaseDetached = new ManualResetEventSlim();
+        Task<(bool FirstCompletion, bool FinalCompletion)> weakReset =
+            Task.Run(
+                () =>
+                {
+                    NeonLetterRestoreResetRequest request =
+                        ownership.GetResetRequest(reset);
+                    NeonLetterDetachedRestoreCleanup cleanup =
+                        coordinator.DetachForReset();
+                    Assert.True(
+                        detachedBarrier.SignalAndWait(TestTimeout));
+                    Assert.True(releaseDetached.Wait(TestTimeout));
+                    bool firstCompletion = ownership.TryCompleteReset(
+                        reset,
+                        request.Version,
+                        rollbackSatisfied: false,
+                        out NeonLetterRestoreResetRequest upgraded,
+                        out _);
+                    cleanup.Rollback();
+                    bool finalCompletion = ownership.TryCompleteReset(
+                        reset,
+                        upgraded.Version,
+                        rollbackSatisfied: true,
+                        out _,
+                        out _);
+                    return (firstCompletion, finalCompletion);
+                });
+        Assert.True(detachedBarrier.SignalAndWait(TestTimeout));
+
+        bool upgradeOwned = ownership.RequestReset(
+            rollbackOwnedFallbacks: true,
+            resumeLoads: false,
+            out _);
+        releaseDetached.Set();
+        (bool firstCompletion, bool finalCompletion) =
+            await weakReset.WaitAsync(TestTimeout);
+
+        Assert.Equal(
+            (false, false, true, 1, 0),
+            (
+                upgradeOwned,
+                firstCompletion,
+                finalCompletion,
+                rollbackCount,
+                coordinator.PendingCount));
+    }
+
+    [Fact]
+    public void UpdateWeakResetHonorsUpgradeBeforeOwnershipTransfer()
+    {
+        var ownership = new NeonLetterRestoreWorkOwnership();
+        Assert.True(ownership.TryBeginUpdate(out var update));
+        int rollbackCount = 0;
+        NeonLetterMultiplayerRestoreCoordinator<DisposableTarget> coordinator =
+            CreateOwnedFallbackCoordinator(() => rollbackCount++);
+        Assert.False(
+            ownership.RequestReset(
+                rollbackOwnedFallbacks: false,
+                resumeLoads: true,
+                out _));
+        Assert.True(
+            ownership.TryGetPendingResetRequest(
+                update,
+                out NeonLetterRestoreResetRequest weakRequest));
+        NeonLetterDetachedRestoreCleanup cleanup =
+            coordinator.DetachForReset();
+
+        Assert.False(
+            ownership.RequestReset(
+                rollbackOwnedFallbacks: true,
+                resumeLoads: false,
+                out _));
+        Assert.True(ownership.CompleteUpdate(update, out var reset));
+        bool weakCompletion = ownership.TryCompleteReset(
+            reset,
+            weakRequest.Version,
+            rollbackSatisfied: false,
+            out NeonLetterRestoreResetRequest upgraded,
+            out _);
+        cleanup.Rollback();
+        bool strongCompletion = ownership.TryCompleteReset(
+            reset,
+            upgraded.Version,
+            rollbackSatisfied: true,
+            out _,
+            out _);
+
+        Assert.Equal(
+            (false, true, 1, 0),
+            (
+                weakCompletion,
+                strongCompletion,
+                rollbackCount,
+                coordinator.PendingCount));
+    }
+
+    [Fact]
+    public void MultipleStrongUpgradesConsumeDetachedCleanupExactlyOnce()
+    {
+        var ownership = new NeonLetterRestoreWorkOwnership();
+        Assert.True(
+            ownership.RequestReset(
+                rollbackOwnedFallbacks: false,
+                resumeLoads: true,
+                out var reset));
+        int rollbackCount = 0;
+        NeonLetterMultiplayerRestoreCoordinator<DisposableTarget> coordinator =
+            CreateOwnedFallbackCoordinator(() => rollbackCount++);
+        NeonLetterRestoreResetRequest weakRequest =
+            ownership.GetResetRequest(reset);
+        NeonLetterDetachedRestoreCleanup cleanup =
+            coordinator.DetachForReset();
+
+        ownership.RequestReset(true, false, out _);
+        ownership.RequestReset(true, false, out _);
+        ownership.RequestReset(true, false, out _);
+        Assert.False(
+            ownership.TryCompleteReset(
+                reset,
+                weakRequest.Version,
+                rollbackSatisfied: false,
+                out NeonLetterRestoreResetRequest upgraded,
+                out _));
+        cleanup.Rollback();
+        cleanup.Rollback();
+        Assert.True(
+            ownership.TryCompleteReset(
+                reset,
+                upgraded.Version,
+                rollbackSatisfied: true,
+                out _,
+                out _));
+
+        Assert.Equal(1, rollbackCount);
+    }
+
+    [Fact]
+    public void StrongResetAfterCompletedWeakResetDoesNotDisposeAbandonedFallback()
+    {
+        var ownership = new NeonLetterRestoreWorkOwnership();
+        Assert.True(
+            ownership.RequestReset(
+                rollbackOwnedFallbacks: false,
+                resumeLoads: true,
+                out var weakReset));
+        int rollbackCount = 0;
+        NeonLetterMultiplayerRestoreCoordinator<DisposableTarget> coordinator =
+            CreateOwnedFallbackCoordinator(() => rollbackCount++);
+        NeonLetterRestoreResetRequest weakRequest =
+            ownership.GetResetRequest(weakReset);
+        NeonLetterDetachedRestoreCleanup cleanup =
+            coordinator.DetachForReset();
+
+        Assert.True(
+            ownership.TryCompleteReset(
+                weakReset,
+                weakRequest.Version,
+                rollbackSatisfied: false,
+                out _,
+                out _));
+        cleanup.Abandon();
+        Assert.True(
+            ownership.RequestReset(
+                rollbackOwnedFallbacks: true,
+                resumeLoads: false,
+                out var strongReset));
+        NeonLetterRestoreResetRequest strongRequest =
+            ownership.GetResetRequest(strongReset);
+        coordinator.Clear();
+        Assert.True(
+            ownership.TryCompleteReset(
+                strongReset,
+                strongRequest.Version,
+                rollbackSatisfied: true,
+                out _,
+                out _));
+
+        Assert.Equal(
+            (0, 0),
+            (rollbackCount, coordinator.PendingCount));
+    }
+
     private static NeonLetterMultiplayerSaveEnvelope CreateEnvelope(
         int nativeSaveId)
     {
@@ -285,6 +500,26 @@ public sealed class RestoreWorkOwnershipTests
             Rotation = new NeonQuaternion(0f, 0f, 0f, 1f),
             PackedColor = NeonLetterNetworkProtocol.Pack(NeonRgba.ProjectCyan)
         };
+    }
+
+    private static
+        NeonLetterMultiplayerRestoreCoordinator<DisposableTarget>
+        CreateOwnedFallbackCoordinator(Action dispose)
+    {
+        var coordinator =
+            new NeonLetterMultiplayerRestoreCoordinator<DisposableTarget>();
+        coordinator.Stage(CreateEnvelope(nativeSaveId: 0));
+        coordinator.SetRole(NeonLetterMultiplayerRestoreRole.Host);
+        coordinator.Advance(
+            nowSeconds: 0d,
+            observe: (_, _, _) =>
+                new NeonLetterMultiplayerRestoreObservation<DisposableTarget>(
+                    NeonLetterMultiplayerRestoreObservationKind
+                        .ReadyToSpawnFallback),
+            startFallback: _ => new DisposableTarget(dispose),
+            applyRestored: (_, _) => true,
+            onEntryError: (_, exception) => throw exception);
+        return coordinator;
     }
 
     private sealed class DisposableTarget : IDisposable

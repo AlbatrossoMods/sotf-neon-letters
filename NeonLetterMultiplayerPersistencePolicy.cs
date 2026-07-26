@@ -364,6 +364,26 @@ internal sealed class NeonLetterMultiplayerRestoreLoadQueue
     }
 }
 
+internal sealed class NeonLetterDetachedRestoreCleanup
+{
+    private Action? _rollback;
+
+    internal NeonLetterDetachedRestoreCleanup(Action? rollback)
+    {
+        _rollback = rollback;
+    }
+
+    internal void Rollback()
+    {
+        Interlocked.Exchange(ref _rollback, null)?.Invoke();
+    }
+
+    internal void Abandon()
+    {
+        Interlocked.Exchange(ref _rollback, null);
+    }
+}
+
 public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
     where TTarget : class
 {
@@ -459,9 +479,18 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
 
     internal void AbandonWithoutWorldMutation()
     {
+        DetachForReset().Abandon();
+    }
+
+    internal NeonLetterDetachedRestoreCleanup DetachForReset()
+    {
         BeginNextRestoreEpoch(abandonWithoutMutation: true);
-        DetachLoadedState();
+        List<OwnedFallback>? ownedFallbacks = DetachLoadedState();
         _role = NeonLetterMultiplayerRestoreRole.Unknown;
+        return new NeonLetterDetachedRestoreCleanup(
+            ownedFallbacks == null
+                ? null
+                : () => RollbackFallbacks(ownedFallbacks));
     }
 
     public void Advance(

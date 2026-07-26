@@ -3921,7 +3921,10 @@ void CheckColorRuntimeSafetyContract()
     CheckEqual(
         true,
         multiplayerSaveRuntimeSource.Contains(
-            "AbandonWithoutWorldMutation",
+            "DetachForReset",
+            StringComparison.Ordinal) &&
+        multiplayerSaveRuntimeSource.Contains(
+            "detachedCleanup?.Abandon()",
             StringComparison.Ordinal),
         "world exit abandons restore ownership without destroying world objects");
     CheckEqual(

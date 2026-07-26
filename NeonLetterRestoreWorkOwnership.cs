@@ -10,7 +10,8 @@ internal readonly record struct NeonLetterRestoreResetOwnership(
     object? Token);
 
 internal readonly record struct NeonLetterRestoreResetRequest(
-    bool RollbackOwnedFallbacks);
+    bool RollbackOwnedFallbacks,
+    ulong Version);
 
 internal readonly record struct NeonLetterRestoreResetCompletion(
     bool ResumeLoads);
@@ -91,7 +92,8 @@ internal sealed class NeonLetterRestoreWorkOwnership
             }
 
             request = new NeonLetterRestoreResetRequest(
-                _rollbackOwnedFallbacks);
+                _rollbackOwnedFallbacks,
+                _generations.Current);
             return true;
         }
     }
@@ -128,24 +130,50 @@ internal sealed class NeonLetterRestoreWorkOwnership
         {
             EnsureResetOwner(ownership);
             return new NeonLetterRestoreResetRequest(
-                _rollbackOwnedFallbacks);
+                _rollbackOwnedFallbacks,
+                _generations.Current);
         }
     }
 
-    internal NeonLetterRestoreResetCompletion CompleteReset(
-        NeonLetterRestoreResetOwnership ownership)
+    internal bool TryCompleteReset(
+        NeonLetterRestoreResetOwnership ownership,
+        ulong satisfiedVersion,
+        bool rollbackSatisfied,
+        out NeonLetterRestoreResetRequest pendingRequest,
+        out NeonLetterRestoreResetCompletion completion)
     {
         lock (_sync)
         {
             EnsureResetOwner(ownership);
-            var completion = new NeonLetterRestoreResetCompletion(
+            ulong currentVersion = _generations.Current;
+            if (satisfiedVersion > currentVersion)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(satisfiedVersion),
+                    satisfiedVersion,
+                    "The satisfied reset version cannot be newer than the " +
+                    "current reset request.");
+            }
+
+            if (satisfiedVersion != currentVersion ||
+                (_rollbackOwnedFallbacks && !rollbackSatisfied))
+            {
+                pendingRequest = new NeonLetterRestoreResetRequest(
+                    _rollbackOwnedFallbacks,
+                    currentVersion);
+                completion = default;
+                return false;
+            }
+
+            completion = new NeonLetterRestoreResetCompletion(
                 ResumeLoads: !_keepLoadsSuspended);
             _owner = OwnershipKind.None;
             _ownerToken = null;
             _resetRequested = false;
             _rollbackOwnedFallbacks = false;
             _keepLoadsSuspended = false;
-            return completion;
+            pendingRequest = default;
+            return true;
         }
     }
 

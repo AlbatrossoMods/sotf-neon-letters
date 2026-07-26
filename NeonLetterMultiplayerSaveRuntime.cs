@@ -48,7 +48,8 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
     private volatile bool _afterLoadSaveReceived;
     private volatile bool _afterSpawnReceived;
     private NeonLetterRestoreUpdateOwnership? _activeUpdateOwnership;
-    private bool _coordinatorResetPerformed;
+    private NeonLetterDetachedRestoreCleanup _detachedResetCleanup;
+    private bool _rollbackResetSatisfied;
     private long _restoreUpdateTick;
 
     private NeonLetterMultiplayerSaveRuntime()
@@ -281,8 +282,11 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         }
         finally
         {
-            bool coordinatorResetPerformed = _coordinatorResetPerformed;
-            _coordinatorResetPerformed = false;
+            NeonLetterDetachedRestoreCleanup detachedResetCleanup =
+                _detachedResetCleanup;
+            bool rollbackResetSatisfied = _rollbackResetSatisfied;
+            _detachedResetCleanup = null;
+            _rollbackResetSatisfied = false;
             _activeUpdateOwnership = null;
             if (_restoreWork.CompleteUpdate(
                     ownership,
@@ -290,7 +294,8 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             {
                 PerformReset(
                     resetOwnership,
-                    coordinatorResetPerformed);
+                    detachedResetCleanup,
+                    rollbackResetSatisfied);
             }
         }
     }
@@ -325,20 +330,28 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
     private void PerformReset(
         NeonLetterRestoreResetOwnership ownership,
-        bool coordinatorResetPerformed = false)
+        NeonLetterDetachedRestoreCleanup detachedCleanup = null,
+        bool rollbackSatisfied = false)
     {
         NeonLetterRestoreResetRequest request =
             _restoreWork.GetResetRequest(ownership);
         try
         {
-            if (!coordinatorResetPerformed &&
-                request.RollbackOwnedFallbacks)
+            if (request.RollbackOwnedFallbacks && !rollbackSatisfied)
             {
-                _restoreCoordinator.Clear();
+                rollbackSatisfied = true;
+                if (detachedCleanup == null)
+                {
+                    _restoreCoordinator.Clear();
+                }
+                else
+                {
+                    detachedCleanup.Rollback();
+                }
             }
-            else if (!coordinatorResetPerformed)
+            else if (detachedCleanup == null && !rollbackSatisfied)
             {
-                _restoreCoordinator.AbandonWithoutWorldMutation();
+                detachedCleanup = _restoreCoordinator.DetachForReset();
             }
         }
         finally
@@ -350,8 +363,32 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             _restoreReadiness.Reset();
             _restoreUpdateTick = 0;
             _queuedLoads.SuspendAndClear();
-            NeonLetterRestoreResetCompletion completion =
-                _restoreWork.CompleteReset(ownership);
+            NeonLetterRestoreResetCompletion completion;
+            while (!_restoreWork.TryCompleteReset(
+                       ownership,
+                       request.Version,
+                       rollbackSatisfied,
+                       out request,
+                       out completion))
+            {
+                if (!request.RollbackOwnedFallbacks ||
+                    rollbackSatisfied)
+                {
+                    continue;
+                }
+
+                rollbackSatisfied = true;
+                if (detachedCleanup == null)
+                {
+                    _restoreCoordinator.Clear();
+                }
+                else
+                {
+                    detachedCleanup.Rollback();
+                }
+            }
+
+            detachedCleanup?.Abandon();
             if (completion.ResumeLoads && _initialized)
             {
                 _queuedLoads.Resume();
@@ -361,7 +398,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
     private bool TryCancelRequestedRestoreWork()
     {
-        if (_coordinatorResetPerformed)
+        if (_detachedResetCleanup != null || _rollbackResetSatisfied)
         {
             return true;
         }
@@ -374,14 +411,14 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             return false;
         }
 
-        _coordinatorResetPerformed = true;
         if (request.RollbackOwnedFallbacks)
         {
+            _rollbackResetSatisfied = true;
             _restoreCoordinator.Clear();
         }
         else
         {
-            _restoreCoordinator.AbandonWithoutWorldMutation();
+            _detachedResetCleanup = _restoreCoordinator.DetachForReset();
         }
 
         return true;
