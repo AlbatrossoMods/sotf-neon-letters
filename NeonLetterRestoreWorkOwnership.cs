@@ -78,7 +78,9 @@ internal sealed class NeonLetterRestoreWorkOwnership
             _resetRequested = true;
             _rollbackOwnedFallbacks |= rollbackOwnedFallbacks;
             _keepLoadsSuspended |= !resumeLoads;
-            _queueSuspensionGeneration = queueSuspensionGeneration;
+            _queueSuspensionGeneration = Math.Max(
+                _queueSuspensionGeneration,
+                queueSuspensionGeneration);
             _generations.Advance();
             if (_owner != OwnershipKind.None)
             {

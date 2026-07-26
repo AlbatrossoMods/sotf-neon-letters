@@ -586,6 +586,116 @@ public sealed class RestoreWorkOwnershipTests
                 completion.QueueSuspensionGeneration));
     }
 
+    [Fact]
+    public async Task OlderResetRegistrationCannotReplaceNewerQueueSuspensionAsync()
+    {
+        var queue = new NeonLetterMultiplayerRestoreLoadQueue();
+        var ownership = new NeonLetterRestoreWorkOwnership();
+        using var suspensionBarrier = new Barrier(2);
+        using var releaseRegistration = new ManualResetEventSlim();
+        Task<(ulong Generation, bool Owned)> olderRegistration =
+            Task.Run(
+                () =>
+                {
+                    ulong generation = queue.SuspendAndClear();
+                    Assert.True(
+                        suspensionBarrier.SignalAndWait(TestTimeout));
+                    Assert.True(
+                        releaseRegistration.Wait(TestTimeout));
+                    bool owned = ownership.RequestReset(
+                        rollbackOwnedFallbacks: true,
+                        resumeLoads: true,
+                        generation,
+                        out _);
+                    return (generation, owned);
+                });
+        Assert.True(suspensionBarrier.SignalAndWait(TestTimeout));
+
+        ulong newerGeneration;
+        NeonLetterRestoreResetOwnership reset;
+        try
+        {
+            newerGeneration = queue.SuspendAndClear();
+            Assert.True(
+                ownership.RequestReset(
+                    rollbackOwnedFallbacks: false,
+                    resumeLoads: true,
+                    newerGeneration,
+                    out reset));
+        }
+        finally
+        {
+            releaseRegistration.Set();
+        }
+
+        (ulong olderGeneration, bool olderOwned) =
+            await olderRegistration.WaitAsync(TestTimeout);
+        NeonLetterRestoreResetRequest request =
+            ownership.GetResetRequest(reset);
+        Assert.True(
+            ownership.TryCompleteReset(
+                reset,
+                request.Version,
+                rollbackSatisfied: true,
+                out _,
+                out NeonLetterRestoreResetCompletion completion));
+        bool resumed = queue.Resume(
+            completion.QueueSuspensionGeneration);
+        bool loadAccepted = queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
+
+        Assert.Equal(
+            (false, true, newerGeneration, true, true, true),
+            (
+                olderOwned,
+                request.RollbackOwnedFallbacks,
+                completion.QueueSuspensionGeneration,
+                newerGeneration > olderGeneration,
+                resumed,
+                loadAccepted));
+    }
+
+    [Fact]
+    public void NewerResetRegistrationReplacesOlderQueueSuspension()
+    {
+        var queue = new NeonLetterMultiplayerRestoreLoadQueue();
+        var ownership = new NeonLetterRestoreWorkOwnership();
+        ulong olderGeneration = queue.SuspendAndClear();
+        Assert.True(
+            ownership.RequestReset(
+                rollbackOwnedFallbacks: false,
+                resumeLoads: true,
+                olderGeneration,
+                out var reset));
+        ulong newerGeneration = queue.SuspendAndClear();
+        Assert.False(
+            ownership.RequestReset(
+                rollbackOwnedFallbacks: true,
+                resumeLoads: true,
+                newerGeneration,
+                out _));
+        NeonLetterRestoreResetRequest request =
+            ownership.GetResetRequest(reset);
+        Assert.True(
+            ownership.TryCompleteReset(
+                reset,
+                request.Version,
+                rollbackSatisfied: true,
+                out _,
+                out NeonLetterRestoreResetCompletion completion));
+
+        bool resumed = queue.Resume(
+            completion.QueueSuspensionGeneration);
+        bool loadAccepted = queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
+
+        Assert.Equal(
+            (true, newerGeneration, true, true),
+            (
+                request.RollbackOwnedFallbacks,
+                completion.QueueSuspensionGeneration,
+                resumed,
+                loadAccepted));
+    }
+
     private static NeonLetterMultiplayerSaveEnvelope CreateEnvelope(
         int nativeSaveId)
     {
