@@ -43,8 +43,24 @@ internal delegate void NeonLetterPendingApplyErrorCallback<TState, TKey>(
 public sealed class NeonLetterAuthoritativeColors<TKey>
     where TKey : notnull
 {
-    private readonly Dictionary<TKey, NeonLetterAuthoritativeColor> _colors =
+    private readonly Dictionary<TKey, AuthoritativeEntry> _colors =
         new();
+    private readonly SortedSet<IndexedEntry> _entriesByChangeSerial =
+        new(IndexedEntryComparer.Instance);
+    private ulong _lastChangeSerial;
+
+    public NeonLetterAuthoritativeColors()
+    {
+    }
+
+    internal NeonLetterAuthoritativeColors(ulong initialChangeSerial)
+    {
+        _lastChangeSerial = initialChangeSerial;
+    }
+
+    internal int CurrentEntryCount => _colors.Count;
+    internal int IndexedEntryCount => _entriesByChangeSerial.Count;
+    internal ulong CurrentChangeSerial => _lastChangeSerial;
 
     public NeonLetterColorAcceptance TryAccept(
         bool isHost,
@@ -55,7 +71,7 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
     {
         if (!isHost || !isLive || !IsKnownRecipe(recipeId))
         {
-            NeonLetterAuthoritativeColor current = ResolveState(identity);
+            AuthoritativeEntry current = ResolveEntry(identity);
             return new NeonLetterColorAcceptance(
                 false,
                 current.Color,
@@ -66,17 +82,47 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
         NeonRgba canonicalColor = NeonLetterNetworkProtocol.Unpack(
             NeonLetterNetworkProtocol.CurrentVersion,
             packedColor);
-        NeonLetterAuthoritativeColor currentState = ResolveState(identity);
+        AuthoritativeEntry currentState = ResolveEntry(identity);
         if (currentState.Revision == ulong.MaxValue)
         {
             throw new InvalidOperationException(
                 "The authoritative color revision space is exhausted.");
         }
 
+        if (_lastChangeSerial == ulong.MaxValue)
+        {
+            throw new InvalidOperationException(
+                "The authoritative color change serial space is exhausted.");
+        }
+
         ulong revision = currentState.Revision + 1;
-        _colors[identity] = new NeonLetterAuthoritativeColor(
+        ulong changeSerial = _lastChangeSerial + 1;
+        if (currentState.ChangeSerial != 0 &&
+            !_entriesByChangeSerial.Remove(
+                new IndexedEntry(currentState.ChangeSerial, identity)))
+        {
+            throw new InvalidOperationException(
+                "The authoritative color serial index is inconsistent.");
+        }
+
+        var indexed = new IndexedEntry(changeSerial, identity);
+        if (!_entriesByChangeSerial.Add(indexed))
+        {
+            if (currentState.ChangeSerial != 0)
+            {
+                _entriesByChangeSerial.Add(
+                    new IndexedEntry(currentState.ChangeSerial, identity));
+            }
+
+            throw new InvalidOperationException(
+                "The authoritative color change serial was reused.");
+        }
+
+        _colors[identity] = new AuthoritativeEntry(
             canonicalColor,
-            revision);
+            revision,
+            changeSerial);
+        _lastChangeSerial = changeSerial;
 
         return new NeonLetterColorAcceptance(
             true,
@@ -84,34 +130,68 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
             revision);
     }
 
-    public IReadOnlyList<KeyValuePair<TKey, NeonRgba>> Snapshot(
-        Func<TKey, bool> isLive)
+    internal NeonLetterAuthoritativeColorPage<TKey> CreatePage(
+        ulong cursorChangeSerial,
+        ulong watermarkChangeSerial)
     {
-        ArgumentNullException.ThrowIfNull(isLive);
-
-        var snapshot = new List<KeyValuePair<TKey, NeonRgba>>(_colors.Count);
-        var deadIdentities = new List<TKey>();
-        foreach (KeyValuePair<TKey, NeonLetterAuthoritativeColor> entry in _colors)
+        ulong watermark = watermarkChangeSerial == 0
+            ? _lastChangeSerial
+            : watermarkChangeSerial;
+        if (cursorChangeSerial > watermark ||
+            watermark > _lastChangeSerial)
         {
-            if (isLive(entry.Key))
-            {
-                snapshot.Add(
-                    new KeyValuePair<TKey, NeonRgba>(
-                        entry.Key,
-                        entry.Value.Color));
-            }
-            else
-            {
-                deadIdentities.Add(entry.Key);
-            }
+            throw new ArgumentOutOfRangeException(
+                nameof(watermarkChangeSerial),
+                watermarkChangeSerial,
+                "The page watermark must be within the current session.");
         }
 
-        foreach (TKey identity in deadIdentities)
+        var entries = new List<NeonLetterColorPageEntry<TKey>>(
+            Math.Min(_colors.Count, NeonLetterColorPageProtocol.MaxPageEntries));
+        if (cursorChangeSerial == watermark)
         {
-            _colors.Remove(identity);
+            return new NeonLetterAuthoritativeColorPage<TKey>(
+                watermark,
+                watermark,
+                Complete: true,
+                entries);
         }
 
-        return snapshot;
+        var lowerBound = new IndexedEntry(
+            cursorChangeSerial + 1,
+            default!);
+        var upperBound = new IndexedEntry(watermark, default!);
+        IEnumerator<IndexedEntry> enumerator = _entriesByChangeSerial
+            .GetViewBetween(lowerBound, upperBound)
+            .GetEnumerator();
+        ulong nextCursor = watermark;
+        bool hasMore;
+        try
+        {
+            while (entries.Count < NeonLetterColorPageProtocol.MaxPageEntries &&
+                   enumerator.MoveNext())
+            {
+                IndexedEntry indexed = enumerator.Current;
+                AuthoritativeEntry current = _colors[indexed.Identity];
+                entries.Add(new NeonLetterColorPageEntry<TKey>(
+                    indexed.Identity,
+                    current.Revision,
+                    current.Color));
+                nextCursor = indexed.ChangeSerial;
+            }
+
+            hasMore = enumerator.MoveNext();
+        }
+        finally
+        {
+            enumerator.Dispose();
+        }
+
+        return new NeonLetterAuthoritativeColorPage<TKey>(
+            watermark,
+            hasMore ? nextCursor : watermark,
+            Complete: !hasMore,
+            entries);
     }
 
     public NeonRgba Resolve(TKey identity)
@@ -121,13 +201,8 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
 
     internal NeonLetterAuthoritativeColor ResolveState(TKey identity)
     {
-        return _colors.TryGetValue(
-            identity,
-            out NeonLetterAuthoritativeColor state)
-                ? state
-                : new NeonLetterAuthoritativeColor(
-                    NeonRgba.ProjectCyan,
-                    Revision: 0);
+        AuthoritativeEntry state = ResolveEntry(identity);
+        return new NeonLetterAuthoritativeColor(state.Color, state.Revision);
     }
 
     /// <summary>
@@ -135,18 +210,63 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
     /// </summary>
     public void Remove(TKey identity)
     {
+        if (!_colors.TryGetValue(identity, out AuthoritativeEntry removed))
+        {
+            return;
+        }
+
+        if (!_entriesByChangeSerial.Remove(
+                new IndexedEntry(removed.ChangeSerial, identity)))
+        {
+            throw new InvalidOperationException(
+                "The authoritative color serial index is inconsistent.");
+        }
+
         _colors.Remove(identity);
     }
 
     public void Clear()
     {
         _colors.Clear();
+        _entriesByChangeSerial.Clear();
+        _lastChangeSerial = 0;
     }
 
     private static bool IsKnownRecipe(int recipeId)
     {
         return NeonLetterSmallCatalog.All.Any(
             definition => definition.RecipeId == recipeId);
+    }
+
+    private AuthoritativeEntry ResolveEntry(TKey identity)
+    {
+        return _colors.TryGetValue(identity, out AuthoritativeEntry state)
+            ? state
+            : new AuthoritativeEntry(
+                NeonRgba.ProjectCyan,
+                Revision: 0,
+                ChangeSerial: 0);
+    }
+
+    private readonly record struct AuthoritativeEntry(
+        NeonRgba Color,
+        ulong Revision,
+        ulong ChangeSerial);
+
+    private readonly record struct IndexedEntry(
+        ulong ChangeSerial,
+        TKey Identity);
+
+    private sealed class IndexedEntryComparer : IComparer<IndexedEntry>
+    {
+        internal static readonly IndexedEntryComparer Instance = new();
+
+        public int Compare(IndexedEntry left, IndexedEntry right)
+        {
+            // Session change serials are unique, so this is a total,
+            // deterministic order for every valid index entry.
+            return left.ChangeSerial.CompareTo(right.ChangeSerial);
+        }
     }
 }
 
@@ -210,9 +330,36 @@ public sealed class NeonLetterPendingColors<TKey>
 
     public void Enqueue(TKey identity, NeonRgba color, double nowSeconds)
     {
+        TryEnqueue(identity, color, nowSeconds, persistent: false);
+    }
+
+    internal bool TryEnqueueTransient(
+        TKey identity,
+        NeonRgba color,
+        double nowSeconds)
+    {
+        return TryEnqueue(identity, color, nowSeconds, persistent: false);
+    }
+
+    internal bool TryEnqueuePersistent(
+        TKey identity,
+        NeonRgba color,
+        double nowSeconds)
+    {
+        return TryEnqueue(identity, color, nowSeconds, persistent: true);
+    }
+
+    private bool TryEnqueue(
+        TKey identity,
+        NeonRgba color,
+        double nowSeconds,
+        bool persistent)
+    {
         ValidateNowSeconds(nowSeconds);
-        double expiresAtSeconds = nowSeconds + _lifetimeSeconds;
-        if (!double.IsFinite(expiresAtSeconds))
+        double expiresAtSeconds = persistent
+            ? double.PositiveInfinity
+            : nowSeconds + _lifetimeSeconds;
+        if (!persistent && !double.IsFinite(expiresAtSeconds))
         {
             throw new ArgumentOutOfRangeException(
                 nameof(nowSeconds),
@@ -222,49 +369,29 @@ public sealed class NeonLetterPendingColors<TKey>
 
         if (!_colors.ContainsKey(identity) && _colors.Count >= _capacity)
         {
-            RemoveOldest();
+            if (persistent || !RemoveOldestTransient())
+            {
+                return false;
+            }
         }
 
         if (_colors.TryGetValue(
                 identity,
                 out LinkedListNode<PendingColor>? existing))
         {
+            persistent |= existing.Value.IsPersistent;
             RemoveNode(existing);
         }
 
         var node = new LinkedListNode<PendingColor>(new PendingColor(
             identity,
             color,
-            expiresAtSeconds));
+            expiresAtSeconds,
+            persistent));
         _pending.AddLast(node);
         _colors.Add(identity, node);
         _nextPending ??= node;
-    }
-
-    internal void EnsureCanRetainBatch<TEntry>(
-        IReadOnlyList<TEntry> entries,
-        double nowSeconds,
-        Func<TEntry, TKey> getIdentity)
-    {
-        ArgumentNullException.ThrowIfNull(entries);
-        ArgumentNullException.ThrowIfNull(getIdentity);
-        ValidateNowSeconds(nowSeconds);
-        PruneExpired(nowSeconds);
-
-        int availableCount = _capacity - _colors.Count;
-        var additionalIdentities = new HashSet<TKey>();
-        foreach (TEntry entry in entries)
-        {
-            TKey identity = getIdentity(entry);
-            if (!_colors.ContainsKey(identity) &&
-                additionalIdentities.Add(identity) &&
-                additionalIdentities.Count > availableCount)
-            {
-                throw new InvalidOperationException(
-                    "The complete snapshot batch cannot be retained without " +
-                    "discarding pending replicated color state.");
-            }
-        }
+        return true;
     }
 
     public int ApplyReady(
@@ -292,6 +419,44 @@ public sealed class NeonLetterPendingColors<TKey>
             DirectIsReady,
             DirectApply,
             onApplyError: null);
+    }
+
+    internal bool TryApply(
+        TKey identity,
+        double nowSeconds,
+        Func<TKey, bool> isReady,
+        Action<TKey, NeonRgba> apply)
+    {
+        ArgumentNullException.ThrowIfNull(isReady);
+        ArgumentNullException.ThrowIfNull(apply);
+        ValidateNowSeconds(nowSeconds);
+        if (!_colors.TryGetValue(
+                identity,
+                out LinkedListNode<PendingColor>? node))
+        {
+            return false;
+        }
+
+        PendingColor pending = node.Value;
+        if (!pending.IsPersistent &&
+            nowSeconds >= pending.ExpiresAtSeconds)
+        {
+            RemoveNode(node);
+            return false;
+        }
+
+        if (!isReady(identity))
+        {
+            return false;
+        }
+
+        apply(identity, pending.Color);
+        if (IsCurrent(node, identity))
+        {
+            RemoveNode(node);
+        }
+
+        return true;
     }
 
     public int ApplyReadyContinuing(
@@ -377,29 +542,36 @@ public sealed class NeonLetterPendingColors<TKey>
         NeonLetterPendingApplyCallback<TState, TKey> apply,
         NeonLetterPendingApplyErrorCallback<TState, TKey>? onApplyError)
     {
-        PruneExpired(nowSeconds);
-        if (_colors.Count == 0)
-        {
-            return 0;
-        }
-
         LinkedListNode<PendingColor>? node =
             _nextPending?.List == _pending
                 ? _nextPending
                 : _pending.First;
         int nodesToInspect = _pending.Count;
+        int inspectionBudget = maxItems == int.MaxValue
+            ? nodesToInspect
+            : Math.Min(nodesToInspect, maxItems);
         List<TKey> snapshot = _snapshotPool.Rent();
         int appliedCount = 0;
         try
         {
             for (int inspected = 0;
-                 inspected < nodesToInspect &&
-                 snapshot.Count < maxItems &&
+                 inspected < inspectionBudget &&
                  node != null;
                  inspected++)
             {
-                TKey identity = node.Value.Identity;
-                node = node.Next ?? _pending.First;
+                LinkedListNode<PendingColor> current = node;
+                TKey identity = current.Value.Identity;
+                node = current.Next ?? _pending.First;
+                if (!current.Value.IsPersistent &&
+                    nowSeconds >= current.Value.ExpiresAtSeconds)
+                {
+                    RemoveNode(current);
+                    node = node?.List == _pending
+                        ? node
+                        : _pending.First;
+                    continue;
+                }
+
                 if (!_snapshotPool.IsReservedByOuterBuffer(identity))
                 {
                     snapshot.Add(identity);
@@ -482,7 +654,8 @@ public sealed class NeonLetterPendingColors<TKey>
         while (node != null)
         {
             LinkedListNode<PendingColor>? next = node.Next;
-            if (nowSeconds >= node.Value.ExpiresAtSeconds)
+            if (!node.Value.IsPersistent &&
+                nowSeconds >= node.Value.ExpiresAtSeconds)
             {
                 RemoveNode(node);
             }
@@ -509,12 +682,16 @@ public sealed class NeonLetterPendingColors<TKey>
         _nextPending = null;
     }
 
-    private void RemoveOldest()
+    private bool RemoveOldestTransient()
     {
-        if (_pending.First != null)
+        LinkedListNode<PendingColor>? node = _pending.First;
+        if (node == null || node.Value.IsPersistent)
         {
-            RemoveNode(_pending.First);
+            return false;
         }
+
+        RemoveNode(node);
+        return true;
     }
 
     private bool IsCurrent(
@@ -556,7 +733,8 @@ public sealed class NeonLetterPendingColors<TKey>
     private readonly record struct PendingColor(
         TKey Identity,
         NeonRgba Color,
-        double ExpiresAtSeconds);
+        double ExpiresAtSeconds,
+        bool IsPersistent);
 
     private readonly record struct DirectCallbackState(
         Func<TKey, bool> IsReady,
@@ -624,62 +802,76 @@ public sealed class NeonLetterReplicatedColorState<TKey>
         ArgumentNullException.ThrowIfNull(isReady);
         ArgumentNullException.ThrowIfNull(apply);
 
-        _pendingColors.Prune(nowSeconds);
         _pendingColors.Enqueue(identity, color, nowSeconds);
-        int appliedCount = _pendingColors.ApplyReady(
+        return _pendingColors.TryApply(
+            identity,
             nowSeconds,
-            candidateIdentity =>
-                EqualityComparer<TKey>.Default.Equals(
-                    candidateIdentity,
-                    identity) &&
-                isReady(candidateIdentity),
+            isReady,
             (candidateIdentity, candidateColor) =>
             {
                 apply(candidateIdentity, candidateColor);
                 _resolvedColors.Commit(candidateIdentity, candidateColor);
             });
-        return appliedCount == 1;
     }
 
-    internal int ReceiveBatch<TEntry>(
-        IReadOnlyList<TEntry> entries,
+    internal bool TryReceivePersistent(
+        TKey identity,
+        NeonRgba color,
         double nowSeconds,
-        Func<TEntry, TKey> getIdentity,
-        Func<TEntry, NeonRgba> getColor,
         Func<TKey, bool> isReady,
         Action<TKey, NeonRgba> apply)
     {
-        ArgumentNullException.ThrowIfNull(entries);
-        ArgumentNullException.ThrowIfNull(getIdentity);
-        ArgumentNullException.ThrowIfNull(getColor);
         ArgumentNullException.ThrowIfNull(isReady);
         ArgumentNullException.ThrowIfNull(apply);
 
-        _pendingColors.EnsureCanRetainBatch(
-            entries,
-            nowSeconds,
-            getIdentity);
-        if (entries.Count == 0)
+        if (!_pendingColors.TryEnqueuePersistent(
+                identity,
+                color,
+                nowSeconds))
         {
-            return 0;
+            return false;
         }
 
-        foreach (TEntry entry in entries)
-        {
-            _pendingColors.Enqueue(
-                getIdentity(entry),
-                getColor(entry),
-                nowSeconds);
-        }
-
-        return _pendingColors.ApplyReady(
+        _pendingColors.TryApply(
+            identity,
             nowSeconds,
             isReady,
-            (identity, color) =>
+            (candidateIdentity, candidateColor) =>
             {
-                apply(identity, color);
-                _resolvedColors.Commit(identity, color);
+                apply(candidateIdentity, candidateColor);
+                _resolvedColors.Commit(candidateIdentity, candidateColor);
             });
+        return true;
+    }
+
+    internal bool TryReceiveAuthoritative(
+        TKey identity,
+        NeonRgba color,
+        double nowSeconds,
+        Func<TKey, bool> isReady,
+        Action<TKey, NeonRgba> apply)
+    {
+        ArgumentNullException.ThrowIfNull(isReady);
+        ArgumentNullException.ThrowIfNull(apply);
+
+        if (!_pendingColors.TryEnqueueTransient(
+                identity,
+                color,
+                nowSeconds))
+        {
+            return false;
+        }
+
+        _pendingColors.TryApply(
+            identity,
+            nowSeconds,
+            isReady,
+            (candidateIdentity, candidateColor) =>
+            {
+                apply(candidateIdentity, candidateColor);
+                _resolvedColors.Commit(candidateIdentity, candidateColor);
+            });
+        return true;
     }
 
     public int DrainReady(

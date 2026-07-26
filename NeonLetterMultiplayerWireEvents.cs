@@ -171,15 +171,15 @@ internal static partial class NeonLetterMultiplayerRuntime
 
     }
 
-    private sealed class ColorSnapshotRequestEvent : Packets.NetEvent
+    private sealed class ColorPageRequestEvent : Packets.NetEvent
     {
-        public override string Id => SnapshotRequestEventId;
+        public override string Id => ColorPageRequestEventId;
 
         public override void Read(UdpPacket packet, BoltConnection fromConnection)
         {
             try
             {
-                HandleSnapshotRequest(packet, fromConnection);
+                HandleColorPageRequest(packet, fromConnection);
             }
             catch (Exception exception)
             {
@@ -187,25 +187,26 @@ internal static partial class NeonLetterMultiplayerRuntime
             }
         }
 
-        public void SendRequest(ulong requestId)
+        public void SendRequest(NeonLetterColorPageRequest request)
         {
             Packets.EventPacket packet = NewPacket(64, GlobalTargets.OnlyServer);
-            packet.Packet.WriteByte(
-                NeonLetterSnapshotProtocol.ProtocolVersion);
-            packet.Packet.WriteULong(requestId);
+            packet.Packet.WriteByte(request.ProtocolVersion);
+            packet.Packet.WriteULong(request.SyncId);
+            packet.Packet.WriteULong(request.CursorChangeSerial);
+            packet.Packet.WriteULong(request.WatermarkChangeSerial);
             Send(packet);
         }
     }
 
-    private sealed class ColorSnapshotFrameEvent : Packets.NetEvent
+    private sealed class ColorPageResponseEvent : Packets.NetEvent
     {
-        public override string Id => SnapshotFrameEventId;
+        public override string Id => ColorPageResponseEventId;
 
         public override void Read(UdpPacket packet, BoltConnection fromConnection)
         {
             try
             {
-                HandleSnapshotFrame(packet, fromConnection);
+                HandleColorPageResponse(packet, fromConnection);
             }
             catch (Exception exception)
             {
@@ -213,60 +214,80 @@ internal static partial class NeonLetterMultiplayerRuntime
             }
         }
 
-        public void SendBegin(
-            ulong requestId,
-            int count,
+        public void SendResponse(
+            NeonLetterColorPageResponse<ulong> response,
             BoltConnection connection)
         {
-            Packets.EventPacket packet = NewFramePacket(
-                NeonLetterSnapshotSendFrameKind.Begin,
-                requestId,
+            if (response.ProtocolVersion !=
+                    NeonLetterColorPageProtocol.ProtocolVersion ||
+                response.SyncId == 0 ||
+                response.Sequence == 0 ||
+                response.Entries == null ||
+                response.Entries.Count >
+                    NeonLetterColorPageProtocol.MaxPageEntries)
+            {
+                throw new InvalidOperationException(
+                    "The color page response is invalid.");
+            }
+
+            Packets.EventPacket packet = NewPacket(
+                NeonLetterColorPageProtocol.MaxResponsePacketBytes,
                 connection);
-            packet.Packet.WriteInt(count);
+            packet.Packet.WriteByte(response.ProtocolVersion);
+            packet.Packet.WriteULong(response.SyncId);
+            packet.Packet.WriteULong(response.Sequence);
+            packet.Packet.WriteULong(response.WatermarkChangeSerial);
+            packet.Packet.WriteULong(response.NextCursorChangeSerial);
+            packet.Packet.WriteInt(response.Entries.Count);
+            packet.Packet.WriteByte(response.Complete ? (byte)1 : (byte)0);
+            foreach (NeonLetterColorPageEntry<ulong> entry in response.Entries)
+            {
+                packet.Packet.WriteNetworkId(new NetworkId(entry.Identity));
+                packet.Packet.WriteULong(entry.EntityRevision);
+                packet.Packet.WriteUInt(
+                    NeonLetterNetworkProtocol.Pack(entry.Color));
+            }
+
             Send(packet);
         }
+    }
 
-        public void SendEntry(
-            ulong requestId,
-            int index,
-            NetworkId networkId,
-            NeonRgba color,
-            BoltConnection connection)
+    private struct ColorPageWireReader :
+        INeonLetterColorPageWireReader<ulong>
+    {
+        private readonly UdpPacket _packet;
+
+        internal ColorPageWireReader(UdpPacket packet)
         {
-            Packets.EventPacket packet = NewFramePacket(
-                NeonLetterSnapshotSendFrameKind.Entry,
-                requestId,
-                connection);
-            packet.Packet.WriteInt(index);
-            packet.Packet.WriteNetworkId(networkId);
-            packet.Packet.WriteUInt(NeonLetterNetworkProtocol.Pack(color));
-            Send(packet);
+            ArgumentNullException.ThrowIfNull(packet);
+            _packet = packet;
         }
 
-        public void SendComplete(
-            ulong requestId,
-            int count,
-            BoltConnection connection)
+        public byte ReadByte()
         {
-            Packets.EventPacket packet = NewFramePacket(
-                NeonLetterSnapshotSendFrameKind.Complete,
-                requestId,
-                connection);
-            packet.Packet.WriteInt(count);
-            Send(packet);
+            return _packet.ReadByte();
         }
 
-        private Packets.EventPacket NewFramePacket(
-            NeonLetterSnapshotSendFrameKind kind,
-            ulong requestId,
-            BoltConnection connection)
+        public ulong ReadUInt64()
         {
-            Packets.EventPacket packet = NewPacket(64, connection);
-            packet.Packet.WriteByte(
-                NeonLetterSnapshotProtocol.ProtocolVersion);
-            packet.Packet.WriteByte((byte)kind);
-            packet.Packet.WriteULong(requestId);
-            return packet;
+            return _packet.ReadULong();
+        }
+
+        public int ReadInt32()
+        {
+            return _packet.ReadInt();
+        }
+
+        public ulong ReadIdentity()
+        {
+            return _packet.ReadNetworkId().PackedValue;
+        }
+
+        public NeonRgba ReadColor(byte protocolVersion)
+        {
+            return NeonLetterNetworkProtocol.Unpack(
+                protocolVersion,
+                _packet.ReadUInt());
         }
     }
 

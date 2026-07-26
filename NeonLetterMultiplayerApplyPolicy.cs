@@ -312,6 +312,44 @@ internal sealed class NeonLetterClientApplyCoordinator<TKey>
         NeonRgba color,
         ulong revision)
     {
+        NeonLetterClientApplyDecision<TKey> decision =
+            EvaluateLive(identity, color, revision);
+        if (decision.Action != NeonLetterClientApplyAction.Ignored)
+        {
+            CommitLive(decision);
+        }
+
+        return decision;
+    }
+
+    internal bool TryAcceptLive(
+        TKey identity,
+        NeonRgba color,
+        ulong revision,
+        Func<NeonLetterClientApplyDecision<TKey>, bool> retain)
+    {
+        ArgumentNullException.ThrowIfNull(retain);
+        NeonLetterClientApplyDecision<TKey> decision =
+            EvaluateLive(identity, color, revision);
+        if (decision.Action == NeonLetterClientApplyAction.Ignored)
+        {
+            return true;
+        }
+
+        if (!retain(decision))
+        {
+            return false;
+        }
+
+        CommitLive(decision);
+        return true;
+    }
+
+    private NeonLetterClientApplyDecision<TKey> EvaluateLive(
+        TKey identity,
+        NeonRgba color,
+        ulong revision)
+    {
         if (revision == 0 ||
             (_authoritative.TryGetValue(
                     identity,
@@ -324,9 +362,6 @@ internal sealed class NeonLetterClientApplyCoordinator<TKey>
         NeonRgba canonicalColor = NeonLetterNetworkProtocol.Unpack(
             NeonLetterNetworkProtocol.CurrentVersion,
             NeonLetterNetworkProtocol.Pack(color));
-        _authoritative[identity] = new NeonLetterAuthoritativeColor(
-            canonicalColor,
-            revision);
         return new NeonLetterClientApplyDecision<TKey>(
             NeonLetterClientApplyAction.ApplyAuthoritative,
             RequestId: 0,
@@ -335,21 +370,13 @@ internal sealed class NeonLetterClientApplyCoordinator<TKey>
             revision);
     }
 
-    public void SeedAuthoritative(TKey identity, NeonRgba color)
+    private void CommitLive(
+        NeonLetterClientApplyDecision<TKey> decision)
     {
-        if (_authoritative.ContainsKey(identity))
-        {
-            return;
-        }
-
-        NeonRgba canonicalColor = NeonLetterNetworkProtocol.Unpack(
-            NeonLetterNetworkProtocol.CurrentVersion,
-            NeonLetterNetworkProtocol.Pack(color));
-        _authoritative.Add(
-            identity,
+        _authoritative[decision.Identity] =
             new NeonLetterAuthoritativeColor(
-                canonicalColor,
-                Revision: 0));
+                decision.Color,
+                decision.Revision);
     }
 
     public IReadOnlyList<NeonLetterClientApplyDecision<TKey>> RejectTimedOut(

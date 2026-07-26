@@ -71,6 +71,7 @@ internal static partial class NeonLetterMultiplayerRuntime
             DeferredDisconnects.Remove(connection);
             _hostHandshakes.Remove(connection);
             HostApplyCoordinator.Remove(connection);
+            ColorPageHostCoordinator.Remove(connection);
         }
 
         foreach (BoltConnection connection in
@@ -281,7 +282,9 @@ internal static partial class NeonLetterMultiplayerRuntime
             HelloScheduler.Clear();
             RLog.Msg(
                 "[SOTFNeonLetters] Multiplayer protocol handshake accepted.");
-            RequestSnapshot();
+            ColorPageClientCoordinator.StartSession(
+                canStart: ClientSession.IsAccepted);
+            RequestColorPage();
             return;
         }
 
@@ -438,9 +441,8 @@ internal static partial class NeonLetterMultiplayerRuntime
         HelloScheduler.Clear();
         _clientHelloId = 0;
         _roleReady = false;
-        SnapshotRequestScheduler.Rearm();
-        SnapshotBatchCoordinator.Reset();
-        SnapshotSendCoordinator.Clear();
+        ColorPageHostCoordinator.Clear();
+        ColorPageClientCoordinator.Clear();
     }
 
     private static void ClearSessionState()

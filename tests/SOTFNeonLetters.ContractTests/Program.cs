@@ -1314,30 +1314,33 @@ void CheckMultiplayerStateContract()
     authoritativeColors.TryAccept(true, "entity-z", true, zRecipeId, secondColor);
     authoritativeColors.TryAccept(true, "entity-pruned", true, aRecipeId, requestedColor);
     authoritativeColors.TryAccept(true, "entity-a", true, aRecipeId, replacementColor);
+    authoritativeColors.Remove("entity-pruned");
 
-    IReadOnlyList<KeyValuePair<string, NeonRgba>> snapshot =
-        authoritativeColors.Snapshot(identity => identity != "entity-pruned");
-    Dictionary<string, NeonRgba> snapshotByIdentity = snapshot.ToDictionary(
-        entry => entry.Key,
-        entry => entry.Value);
-    CheckEqual(2, snapshot.Count, "a snapshot includes each live customized identity once");
-    CheckEqual(2, snapshotByIdentity.Count, "a snapshot does not duplicate customized identities");
+    NeonLetterAuthoritativeColorPage<string> page =
+        authoritativeColors.CreatePage(
+            cursorChangeSerial: 0,
+            watermarkChangeSerial: 0);
+    Dictionary<string, NeonRgba> pageByIdentity = page.Entries.ToDictionary(
+        entry => entry.Identity,
+        entry => entry.Color);
+    CheckEqual(2, page.Entries.Count, "a color page includes each current customized identity once");
+    CheckEqual(2, pageByIdentity.Count, "a color page does not duplicate customized identities");
     CheckEqual(
         canonicalReplacement,
-        snapshotByIdentity["entity-a"],
-        "a snapshot contains the latest accepted color for a live identity");
+        pageByIdentity["entity-a"],
+        "a color page contains the latest accepted color for a live identity");
     CheckEqual(
         true,
-        snapshotByIdentity.ContainsKey("entity-z"),
-        "a snapshot contains every other live customized identity");
+        pageByIdentity.ContainsKey("entity-z"),
+        "a color page contains every other current customized identity");
     CheckEqual(
         false,
-        snapshotByIdentity.ContainsKey("entity-pruned"),
-        "a snapshot excludes a dead customized identity");
+        pageByIdentity.ContainsKey("entity-pruned"),
+        "a color page excludes a removed customized identity");
     CheckEqual(
         NeonRgba.ProjectCyan,
         authoritativeColors.Resolve("entity-pruned"),
-        "snapshot generation prunes dead authoritative state");
+        "authoritative removal clears a dismantled identity");
 
     var replicatedState = new NeonLetterReplicatedColorState<string>(
         pendingCapacity: 2,

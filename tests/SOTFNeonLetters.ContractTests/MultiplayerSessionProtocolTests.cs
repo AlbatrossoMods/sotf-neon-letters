@@ -585,7 +585,7 @@ public sealed class MultiplayerSessionProtocolTests
     {
         var coordinator = new NeonLetterClientApplyCoordinator<int>(
             timeoutSeconds: 5d);
-        coordinator.SeedAuthoritative(7, Red);
+        coordinator.AcceptLive(7, Red, revision: 1);
         coordinator.Start(7, Blue, nowSeconds: 0d);
 
         coordinator.Clear();
