@@ -6,8 +6,8 @@
     ],
     "thresholds": {
       "high": 85,
-      "low": 82,
-      "break": 82
+      "low": 83,
+      "break": 83
     },
     "break-on-initial-test-failure": true
   }
