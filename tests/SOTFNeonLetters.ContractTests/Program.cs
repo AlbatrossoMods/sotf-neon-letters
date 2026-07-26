@@ -3811,14 +3811,45 @@ void CheckColorRuntimeSafetyContract()
         FindRepositoryFile("NeonLetterColorInteractionRuntime.cs")
         ?? throw new InvalidOperationException(
             "Could not find the native color interaction adapter.");
+    string? interactionLeaseRuntimePath =
+        FindRepositoryFile("NeonLetterColorInteractionLeaseRuntime.cs");
+    string? interactionLifecycleRuntimePath =
+        FindRepositoryFile("NeonLetterColorInteractionLifecycleRuntime.cs");
+    string? interactionHarmonyPath =
+        FindRepositoryFile("NeonLetterColorInteractionHarmony.cs");
     string modRuntimePath = FindRepositoryFile("SOTFNeonLetters.cs")
         ?? throw new InvalidOperationException(
             "Could not find the mod lifecycle adapter.");
     string modRuntimeSource = File.ReadAllText(modRuntimePath);
+    string interactionLeaseRuntimeSource =
+        interactionLeaseRuntimePath == null
+            ? string.Empty
+            : File.ReadAllText(interactionLeaseRuntimePath);
+    string interactionLifecycleRuntimeSource =
+        interactionLifecycleRuntimePath == null
+            ? string.Empty
+            : File.ReadAllText(interactionLifecycleRuntimePath);
+    string interactionHarmonySource =
+        interactionHarmonyPath == null
+            ? string.Empty
+            : File.ReadAllText(interactionHarmonyPath);
     string source =
         File.ReadAllText(runtimePath) +
         Environment.NewLine +
-        File.ReadAllText(interactionRuntimePath);
+        File.ReadAllText(interactionRuntimePath) +
+        Environment.NewLine +
+        interactionLeaseRuntimeSource +
+        Environment.NewLine +
+        interactionLifecycleRuntimeSource +
+        Environment.NewLine +
+        interactionHarmonySource;
+
+    CheckEqual(
+        true,
+        interactionLeaseRuntimePath != null &&
+        interactionLifecycleRuntimePath != null &&
+        interactionHarmonyPath != null,
+        "native color interaction prompt, lease, lifecycle, and Harmony responsibilities use focused partial files");
 
     CheckEqual(
         false,
@@ -3999,11 +4030,8 @@ void CheckColorRuntimeSafetyContract()
     int observePrompt = source.IndexOf(
         "internal static void ObserveNativeInteractionPrompt(",
         StringComparison.Ordinal);
-    int resetDiscovery = source.IndexOf(
+    int resetDiscovery = interactionLifecycleRuntimeSource.IndexOf(
         "private static void ResetInteractionDiscovery()",
-        StringComparison.Ordinal);
-    int leaseDeclaration = source.IndexOf(
-        "private sealed class ColorInteractionLease",
         StringComparison.Ordinal);
     string endObservationSource =
         endObservation >= 0 && observePrompt > endObservation
@@ -4012,10 +4040,8 @@ void CheckColorRuntimeSafetyContract()
                 observePrompt - endObservation)
             : string.Empty;
     string resetDiscoverySource =
-        resetDiscovery >= 0 && leaseDeclaration > resetDiscovery
-            ? source.Substring(
-                resetDiscovery,
-                leaseDeclaration - resetDiscovery)
+        resetDiscovery >= 0
+            ? interactionLifecycleRuntimeSource.Substring(resetDiscovery)
             : string.Empty;
     CheckEqual(
         true,
@@ -4026,6 +4052,45 @@ void CheckColorRuntimeSafetyContract()
             "_acceptPromptObservations = false",
             StringComparison.Ordinal),
         "world reset preserves prompt observation while mod cleanup closes the postfix gate");
+    CheckEqual(
+        true,
+        !source.Contains(
+            "InteractionLeases.Sweep(",
+            StringComparison.Ordinal) &&
+        !source.Contains(
+            "InteractionLeases.Drain(",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "IsInteractionLeaseAliveCallback",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "TryTakeNextDead(",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "TryTakeFirst(",
+            StringComparison.Ordinal),
+        "native interaction maintenance uses cached callbacks and allocation-free bounded lease removal");
+    CheckEqual(
+        true,
+        source.Contains(
+            "NeonLetterColorInteractionCreationFailures",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "RecordTerminalFailure(",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "RecordTransientFailure(",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "RecordSuccess(",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "InteractionCreationFailures.Remove(structureInstanceId)",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "InteractionCreationFailures.Clear()",
+            StringComparison.Ordinal),
+        "per-structure interaction creation failures have terminal, retry, and recovery state");
     int ownedInteractionRegistered = source.IndexOf(
         "OwnedInteractionInstanceIds.Add(",
         StringComparison.Ordinal);
@@ -4038,8 +4103,14 @@ void CheckColorRuntimeSafetyContract()
         true,
         source.Contains(
             "if (IsDedicatedOrHeadless())",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "ReleaseInteractions(MaxInteractionLeaseSweepsPerUpdate)",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "private static void ReleaseInteractions(int maximumLeases)",
             StringComparison.Ordinal),
-        "dedicated and headless updates stop before prompt discovery or backfill");
+        "dedicated and headless updates perform only bounded lease cleanup before returning");
     CheckEqual(
         true,
         source.Contains("NetUtils.IsDedicatedServer", StringComparison.Ordinal) &&

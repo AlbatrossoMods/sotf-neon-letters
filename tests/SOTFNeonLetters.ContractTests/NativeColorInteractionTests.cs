@@ -3,6 +3,9 @@ using Xunit;
 
 public sealed class NativeColorInteractionTests
 {
+    private static readonly Func<TrackedRoot, bool>
+        IsRootAliveCallback = IsRootAlive;
+
     [Fact]
     public void ProxyGeometryKeepsTheGlyphColliderCenter()
     {
@@ -266,14 +269,19 @@ public sealed class NativeColorInteractionTests
     {
         var registry =
             new NeonLetterColorInteractionLeaseRegistry<TrackedRoot>();
-        var deadRoot = new TrackedRoot(IsAlive: false);
+        var deadRoot = new TrackedRoot(isAlive: false);
         registry.TryAdd(1, deadRoot);
-        registry.TryAdd(2, new TrackedRoot(IsAlive: true));
+        registry.TryAdd(2, new TrackedRoot(isAlive: true));
 
-        IReadOnlyList<TrackedRoot> removed =
-            registry.Sweep(1, root => root.IsAlive);
+        bool removed = registry.TryTakeNextDead(
+            maxEntries: 1,
+            IsRootAliveCallback,
+            out TrackedRoot? removedRoot,
+            out int inspected);
 
-        Assert.Equal((deadRoot, 1), (removed.Single(), registry.Count));
+        Assert.Equal(
+            (true, deadRoot, 1, 1),
+            (removed, removedRoot, inspected, registry.Count));
     }
 
     [Fact]
@@ -284,15 +292,260 @@ public sealed class NativeColorInteractionTests
         registry.TryAdd(1, "first");
         registry.TryAdd(2, "second");
 
-        IReadOnlyList<string> firstDrain = registry.Drain();
-        IReadOnlyList<string> secondDrain = registry.Drain();
+        bool removedFirst = registry.TryTakeFirst(out string? first);
+        bool removedSecond = registry.TryTakeFirst(out string? second);
+        bool removedThird = registry.TryTakeFirst(out _);
 
         Assert.Equal(
-            ("first,second", string.Empty, 0),
+            (true, "first", true, "second", false, 0),
             (
-                string.Join(",", firstDrain),
-                string.Join(",", secondDrain),
+                removedFirst,
+                first,
+                removedSecond,
+                second,
+                removedThird,
                 registry.Count));
+    }
+
+    [Fact]
+    public void EmptyLeaseMaintenanceHasNoPerUpdateAllocation()
+    {
+        var registry =
+            new NeonLetterColorInteractionLeaseRegistry<TrackedRoot>();
+        MeasureEmptyLeaseMaintenanceAllocation(
+            registry,
+            iterations: 2_048);
+        long maximumAllocatedBytes = 0;
+
+        for (int sample = 0; sample < 5; sample++)
+        {
+            maximumAllocatedBytes = Math.Max(
+                maximumAllocatedBytes,
+                MeasureEmptyLeaseMaintenanceAllocation(
+                    registry,
+                    iterations: 100_000));
+        }
+
+        Assert.InRange(maximumAllocatedBytes, 0, 256);
+    }
+
+    [Fact]
+    public void LiveLeaseMaintenanceInspectsOnlyItsBoundWithoutAllocating()
+    {
+        const int LeaseCount = 10_000;
+        const int EntriesPerUpdate = 16;
+        const int UpdatesPerSample = 10_000;
+        var registry =
+            new NeonLetterColorInteractionLeaseRegistry<TrackedRoot>();
+        for (int index = 0; index < LeaseCount; index++)
+        {
+            registry.TryAdd(index, new TrackedRoot(isAlive: true));
+        }
+
+        MeasureLiveLeaseMaintenanceAllocation(
+            registry,
+            EntriesPerUpdate,
+            iterations: 2_048,
+            out _,
+            out _);
+        long maximumAllocatedBytes = 0;
+        int inspected = 0;
+        bool removed = false;
+        for (int sample = 0; sample < 5; sample++)
+        {
+            maximumAllocatedBytes = Math.Max(
+                maximumAllocatedBytes,
+                MeasureLiveLeaseMaintenanceAllocation(
+                    registry,
+                    EntriesPerUpdate,
+                    UpdatesPerSample,
+                    out inspected,
+                    out removed));
+        }
+
+        Assert.Equal(
+            (
+                EntriesPerUpdate * UpdatesPerSample,
+                false,
+                LeaseCount,
+                true),
+            (
+                inspected,
+                removed,
+                registry.Count,
+                maximumAllocatedBytes <= 256));
+    }
+
+    [Fact]
+    public void PermanentStructuralFailureAttemptsAndLogsOnlyOnce()
+    {
+        var failures =
+            new NeonLetterColorInteractionCreationFailures<string>();
+        int attempts = 0;
+        int logs = 0;
+        for (long updateTick = 0;
+             updateTick < 100_000;
+             updateTick++)
+        {
+            if (!failures.AllowsAttempt(7, updateTick))
+            {
+                continue;
+            }
+
+            attempts++;
+            if (failures.RecordTerminalFailure(
+                    7,
+                    "missing root collider"))
+            {
+                logs++;
+            }
+        }
+
+        Assert.Equal((1, 1, 1), (attempts, logs, failures.Count));
+    }
+
+    [Fact]
+    public void RepeatedTransientFailureUsesCappedBackoffAndCanRecover()
+    {
+        var failures =
+            new NeonLetterColorInteractionCreationFailures<string>();
+        int attempts = 0;
+        int logs = 0;
+        for (long updateTick = 0;
+             updateTick < 100_000;
+             updateTick++)
+        {
+            if (!failures.AllowsAttempt(7, updateTick))
+            {
+                continue;
+            }
+
+            attempts++;
+            if (attempts < 9)
+            {
+                if (failures.RecordTransientFailure(
+                        7,
+                        updateTick,
+                        "temporary creation failure"))
+                {
+                    logs++;
+                }
+
+                continue;
+            }
+
+            failures.RecordSuccess(7);
+            break;
+        }
+
+        Assert.Equal((9, 1, 0), (attempts, logs, failures.Count));
+    }
+
+    [Fact]
+    public void PersistentTransientFailureHasBoundedAttemptsOverManyUpdates()
+    {
+        var failures =
+            new NeonLetterColorInteractionCreationFailures<string>();
+        int attempts = 0;
+        int logs = 0;
+        for (long updateTick = 0;
+             updateTick < 100_000;
+             updateTick++)
+        {
+            if (!failures.AllowsAttempt(7, updateTick))
+            {
+                continue;
+            }
+
+            attempts++;
+            if (failures.RecordTransientFailure(
+                    7,
+                    updateTick,
+                    "temporary creation failure"))
+            {
+                logs++;
+            }
+        }
+
+        Assert.Equal((19, 1, 1), (attempts, logs, failures.Count));
+    }
+
+    [Fact]
+    public void ChangedFailureFingerprintStartsOneNewLoggingEpisode()
+    {
+        var failures =
+            new NeonLetterColorInteractionCreationFailures<string>();
+        bool first = failures.RecordTransientFailure(
+            7,
+            updateTick: 0,
+            "first failure");
+        bool changed = failures.RecordTransientFailure(
+            7,
+            NeonLetterColorInteractionCreationFailures<string>
+                .InitialRetryDelayUpdates,
+            "changed failure");
+        bool repeated = failures.RecordTransientFailure(
+            7,
+            NeonLetterColorInteractionCreationFailures<string>
+                .InitialRetryDelayUpdates * 3,
+            "changed failure");
+
+        Assert.Equal((true, true, false), (first, changed, repeated));
+    }
+
+    [Fact]
+    public void UnregisterAllowsAReplacementLifecycleToRetry()
+    {
+        var failures =
+            new NeonLetterColorInteractionCreationFailures<string>();
+        failures.RecordTerminalFailure(7, "missing root collider");
+
+        failures.Remove(7);
+
+        Assert.True(failures.AllowsAttempt(7, updateTick: 0));
+    }
+
+    [Fact]
+    public void WorldCleanupClearsEveryCreationFailure()
+    {
+        var failures =
+            new NeonLetterColorInteractionCreationFailures<string>();
+        failures.RecordTerminalFailure(7, "missing root collider");
+        failures.RecordTransientFailure(
+            8,
+            updateTick: 0,
+            "temporary creation failure");
+
+        failures.Clear();
+
+        Assert.Equal(
+            (0, true, true),
+            (
+                failures.Count,
+                failures.AllowsAttempt(7, updateTick: 0),
+                failures.AllowsAttempt(8, updateTick: 0)));
+    }
+
+    [Fact]
+    public void FailedStructureDoesNotStarveHealthyNeighbors()
+    {
+        var failures =
+            new NeonLetterColorInteractionCreationFailures<string>();
+        failures.RecordTerminalFailure(1, "missing root collider");
+        int attempts = 0;
+        for (int structureInstanceId = 1;
+             structureInstanceId <= 3;
+             structureInstanceId++)
+        {
+            if (failures.AllowsAttempt(
+                    structureInstanceId,
+                    updateTick: 0))
+            {
+                attempts++;
+            }
+        }
+
+        Assert.Equal(2, attempts);
     }
 
     [Fact]
@@ -597,7 +850,61 @@ public sealed class NativeColorInteractionTests
         Assert.True(lifecycle.IsBackfillPending);
     }
 
-    private sealed record TrackedRoot(bool IsAlive);
+    private static bool IsRootAlive(TrackedRoot root)
+    {
+        return root.IsAlive;
+    }
+
+    private static long MeasureEmptyLeaseMaintenanceAllocation(
+        NeonLetterColorInteractionLeaseRegistry<TrackedRoot> registry,
+        int iterations)
+    {
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int iteration = 0; iteration < iterations; iteration++)
+        {
+            registry.TryTakeNextDead(
+                maxEntries: 16,
+                IsRootAliveCallback,
+                out _,
+                out _);
+            registry.TryTakeFirst(out _);
+        }
+
+        return GC.GetAllocatedBytesForCurrentThread() - before;
+    }
+
+    private static long MeasureLiveLeaseMaintenanceAllocation(
+        NeonLetterColorInteractionLeaseRegistry<TrackedRoot> registry,
+        int maxEntries,
+        int iterations,
+        out int inspected,
+        out bool removed)
+    {
+        inspected = 0;
+        removed = false;
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int iteration = 0; iteration < iterations; iteration++)
+        {
+            removed |= registry.TryTakeNextDead(
+                maxEntries,
+                IsRootAliveCallback,
+                out _,
+                out int inspectedThisUpdate);
+            inspected += inspectedThisUpdate;
+        }
+
+        return GC.GetAllocatedBytesForCurrentThread() - before;
+    }
+
+    private sealed class TrackedRoot
+    {
+        internal TrackedRoot(bool isAlive)
+        {
+            IsAlive = isAlive;
+        }
+
+        internal bool IsAlive { get; }
+    }
 
     private sealed class TrackedPrompt
     {

@@ -219,9 +219,11 @@ internal sealed class NeonLetterColorInteractionLeaseRegistry<TLease>
         return true;
     }
 
-    internal IReadOnlyList<TLease> Sweep(
+    internal bool TryTakeNextDead(
         int maxEntries,
-        Func<TLease, bool> isAlive)
+        Func<TLease, bool> isAlive,
+        out TLease? deadLease,
+        out int inspectedEntries)
     {
         if (maxEntries < 0)
         {
@@ -229,16 +231,16 @@ internal sealed class NeonLetterColorInteractionLeaseRegistry<TLease>
         }
 
         ArgumentNullException.ThrowIfNull(isAlive);
-        var removed = new List<TLease>();
+        deadLease = null;
+        inspectedEntries = 0;
         int entriesToInspect = Math.Min(maxEntries, _entries.Count);
-        for (int inspected = 0;
-             inspected < entriesToInspect;
-             inspected++)
+        while (inspectedEntries < entriesToInspect)
         {
             LinkedListNode<int> sweepNode = _sweepOrder.First!;
             _sweepOrder.RemoveFirst();
             int structureInstanceId = sweepNode.Value;
             Entry entry = _entries[structureInstanceId];
+            inspectedEntries++;
             if (isAlive(entry.Lease))
             {
                 _sweepOrder.AddLast(sweepNode);
@@ -246,23 +248,28 @@ internal sealed class NeonLetterColorInteractionLeaseRegistry<TLease>
             }
 
             _entries.Remove(structureInstanceId);
-            removed.Add(entry.Lease);
+            deadLease = entry.Lease;
+            return true;
         }
 
-        return removed;
+        return false;
     }
 
-    internal IReadOnlyList<TLease> Drain()
+    internal bool TryTakeFirst(out TLease? lease)
     {
-        var leases = new List<TLease>(_entries.Count);
-        foreach (int structureInstanceId in _sweepOrder)
+        LinkedListNode<int>? sweepNode = _sweepOrder.First;
+        if (sweepNode == null)
         {
-            leases.Add(_entries[structureInstanceId].Lease);
+            lease = null;
+            return false;
         }
 
-        _entries.Clear();
-        _sweepOrder.Clear();
-        return leases;
+        int structureInstanceId = sweepNode.Value;
+        Entry entry = _entries[structureInstanceId];
+        _sweepOrder.RemoveFirst();
+        _entries.Remove(structureInstanceId);
+        lease = entry.Lease;
+        return true;
     }
 
     private void Remove(int structureInstanceId, Entry entry)
@@ -295,6 +302,113 @@ internal sealed class NeonLetterColorInteractionFailureGate
     {
         _promptFailureReported = false;
     }
+}
+
+internal sealed class
+    NeonLetterColorInteractionCreationFailures<TFingerprint>
+    where TFingerprint : notnull
+{
+    internal const long InitialRetryDelayUpdates = 120;
+    internal const long MaximumRetryDelayUpdates = 7_680;
+
+    private readonly Dictionary<int, FailureState> _failures = new();
+    private readonly EqualityComparer<TFingerprint> _fingerprints =
+        EqualityComparer<TFingerprint>.Default;
+
+    internal int Count => _failures.Count;
+
+    internal bool AllowsAttempt(
+        int structureInstanceId,
+        long updateTick)
+    {
+        ValidateUpdateTick(updateTick);
+        return !_failures.TryGetValue(
+                   structureInstanceId,
+                   out FailureState failure) ||
+               (!failure.IsTerminal &&
+                updateTick >= failure.NextAttemptTick);
+    }
+
+    internal bool RecordTerminalFailure(
+        int structureInstanceId,
+        TFingerprint fingerprint)
+    {
+        bool reportFailure =
+            !_failures.TryGetValue(
+                structureInstanceId,
+                out FailureState current) ||
+            !_fingerprints.Equals(
+                current.Fingerprint,
+                fingerprint);
+        _failures[structureInstanceId] = new FailureState(
+            IsTerminal: true,
+            NextAttemptTick: long.MaxValue,
+            RetryDelayUpdates: MaximumRetryDelayUpdates,
+            fingerprint);
+        return reportFailure;
+    }
+
+    internal bool RecordTransientFailure(
+        int structureInstanceId,
+        long updateTick,
+        TFingerprint fingerprint)
+    {
+        ValidateUpdateTick(updateTick);
+        bool hasCurrent = _failures.TryGetValue(
+            structureInstanceId,
+            out FailureState current);
+        bool changedFingerprint =
+            !hasCurrent ||
+            !_fingerprints.Equals(
+                current.Fingerprint,
+                fingerprint);
+        long retryDelay =
+            changedFingerprint
+                ? InitialRetryDelayUpdates
+                : current.RetryDelayUpdates;
+        long nextAttemptTick =
+            updateTick > long.MaxValue - retryDelay
+                ? long.MaxValue
+                : updateTick + retryDelay;
+        long nextRetryDelay = Math.Min(
+            retryDelay * 2,
+            MaximumRetryDelayUpdates);
+        _failures[structureInstanceId] = new FailureState(
+            IsTerminal: false,
+            nextAttemptTick,
+            nextRetryDelay,
+            fingerprint);
+        return changedFingerprint;
+    }
+
+    internal void RecordSuccess(int structureInstanceId)
+    {
+        _failures.Remove(structureInstanceId);
+    }
+
+    internal void Remove(int structureInstanceId)
+    {
+        _failures.Remove(structureInstanceId);
+    }
+
+    internal void Clear()
+    {
+        _failures.Clear();
+    }
+
+    private static void ValidateUpdateTick(long updateTick)
+    {
+        if (updateTick < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(updateTick));
+        }
+    }
+
+    private readonly record struct FailureState(
+        bool IsTerminal,
+        long NextAttemptTick,
+        long RetryDelayUpdates,
+        TFingerprint Fingerprint);
 }
 
 internal readonly record struct
