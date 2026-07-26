@@ -60,6 +60,10 @@ namespace SOTFNeonLetters.Editor
         private const int CardMargin = 12;
         private const float NeonEmissiveIntensityNits = 600.0f;
         private const float SmallTargetHeight = 0.5f;
+        // DXT1 shares two RGB endpoints across each 4x4 block. This permits a large
+        // isolated channel error at anti-aliased edges, but not a large image-wide error.
+        private const int MaximumDxt1ChannelError = 160;
+        private const float MaximumDxt1MeanChannelError = 12.0f;
 
         private static readonly LetterDefinition[] Letters = CreateLetterDefinitions();
 
@@ -475,6 +479,11 @@ namespace SOTFNeonLetters.Editor
                     $"{expectedMipCount} mip levels, but has {texture.mipmapCount}.");
             }
 
+            ValidateReadableDxt1Texture(
+                texture,
+                pixels,
+                expectedMipCount,
+                assetDescription);
             texture.Apply(false, true);
             if (texture.isReadable)
             {
@@ -483,6 +492,256 @@ namespace SOTFNeonLetters.Editor
             }
 
             SaveGeneratedAsset(texture, assetPath);
+        }
+
+        private static void ValidateReadableDxt1Texture(
+            Texture2D texture,
+            Color32[] expectedMipZeroPixels,
+            int expectedMipCount,
+            string assetDescription)
+        {
+            if (texture == null)
+            {
+                throw new ArgumentNullException(nameof(texture));
+            }
+
+            if (expectedMipZeroPixels == null)
+            {
+                throw new ArgumentNullException(nameof(expectedMipZeroPixels));
+            }
+
+            if (!texture.isReadable)
+            {
+                throw new InvalidOperationException(
+                    $"Generated {assetDescription} must remain readable until validation completes.");
+            }
+
+            if (texture.format != TextureFormat.DXT1)
+            {
+                throw new InvalidOperationException(
+                    $"Generated {assetDescription} must be DXT1 before validation, " +
+                    $"but is {texture.format}.");
+            }
+
+            if (texture.mipmapCount != expectedMipCount)
+            {
+                throw new InvalidOperationException(
+                    $"Generated {assetDescription} must have {expectedMipCount} mip levels " +
+                    $"before validation, but has {texture.mipmapCount}.");
+            }
+
+            if (expectedMipZeroPixels.Length != texture.width * texture.height)
+            {
+                throw new InvalidOperationException(
+                    $"Generated {assetDescription} source pixel count must be " +
+                    $"{texture.width * texture.height}, but is " +
+                    $"{expectedMipZeroPixels.Length}.");
+            }
+
+            var rawTextureData = texture.GetRawTextureData<byte>();
+            Color32[] previousMipPixels = null;
+            int rawDataOffset = 0;
+            for (int mipLevel = 0; mipLevel < texture.mipmapCount; mipLevel++)
+            {
+                int mipWidth = Math.Max(1, texture.width >> mipLevel);
+                int mipHeight = Math.Max(1, texture.height >> mipLevel);
+                int expectedByteCount = GetDxt1MipByteCount(mipWidth, mipHeight);
+                var rawMipData = texture.GetPixelData<byte>(mipLevel);
+                if (rawMipData.Length != expectedByteCount)
+                {
+                    throw new InvalidOperationException(
+                        $"Generated {assetDescription} mip {mipLevel} must contain " +
+                        $"{expectedByteCount} DXT1 bytes, but contains {rawMipData.Length}.");
+                }
+
+                if (rawDataOffset + expectedByteCount > rawTextureData.Length)
+                {
+                    throw new InvalidOperationException(
+                        $"Generated {assetDescription} mip {mipLevel} extends beyond " +
+                        "the raw DXT1 payload.");
+                }
+
+                for (int index = 0; index < expectedByteCount; index++)
+                {
+                    if (rawMipData[index] != rawTextureData[rawDataOffset + index])
+                    {
+                        throw new InvalidOperationException(
+                            $"Generated {assetDescription} mip {mipLevel} DXT1 bytes " +
+                            $"are not stored at raw offset {rawDataOffset}.");
+                    }
+                }
+
+                Color32[] mipPixels = ReadLogicalDxt1MipPixels(
+                    texture,
+                    mipLevel,
+                    mipWidth,
+                    mipHeight,
+                    assetDescription);
+                if (mipLevel == 0)
+                {
+                    ValidatePixelSimilarity(
+                        expectedMipZeroPixels,
+                        mipPixels,
+                        $"{assetDescription} DXT1 mip 0");
+                }
+                else
+                {
+                    Color32[] expectedMipPixels = DownsampleMipPixels(
+                        previousMipPixels,
+                        Math.Max(1, texture.width >> (mipLevel - 1)),
+                        Math.Max(1, texture.height >> (mipLevel - 1)),
+                        mipWidth,
+                        mipHeight);
+                    ValidatePixelSimilarity(
+                        expectedMipPixels,
+                        mipPixels,
+                        $"{assetDescription} DXT1 mip {mipLevel}");
+                }
+
+                previousMipPixels = mipPixels;
+                rawDataOffset += expectedByteCount;
+            }
+
+            if (Math.Max(1, texture.width >> (texture.mipmapCount - 1)) != 1 ||
+                Math.Max(1, texture.height >> (texture.mipmapCount - 1)) != 1 ||
+                previousMipPixels.Length != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Generated {assetDescription} mip chain must terminate at 1x1.");
+            }
+
+            if (rawDataOffset != rawTextureData.Length)
+            {
+                throw new InvalidOperationException(
+                    $"Generated {assetDescription} DXT1 mip data accounts for " +
+                    $"{rawDataOffset} of {rawTextureData.Length} raw bytes.");
+            }
+        }
+
+        private static Color32[] ReadLogicalDxt1MipPixels(
+            Texture2D texture,
+            int mipLevel,
+            int mipWidth,
+            int mipHeight,
+            string assetDescription)
+        {
+            Color32[] storagePixels = texture.GetPixels32(mipLevel);
+            int storageWidth = Math.Max(4, mipWidth);
+            int storageHeight = Math.Max(4, mipHeight);
+            if (storagePixels.Length != storageWidth * storageHeight)
+            {
+                throw new InvalidOperationException(
+                    $"Generated {assetDescription} mip {mipLevel} must decode to " +
+                    $"{storageWidth * storageHeight} DXT1 storage pixels, but decodes to " +
+                    $"{storagePixels.Length}.");
+            }
+
+            var logicalPixels = new Color32[mipWidth * mipHeight];
+            for (int y = 0; y < mipHeight; y++)
+            {
+                Array.Copy(
+                    storagePixels,
+                    y * storageWidth,
+                    logicalPixels,
+                    y * mipWidth,
+                    mipWidth);
+            }
+
+            return logicalPixels;
+        }
+
+        private static int GetDxt1MipByteCount(int width, int height)
+        {
+            int blockWidth = Math.Max(1, (width + 3) / 4);
+            int blockHeight = Math.Max(1, (height + 3) / 4);
+            return blockWidth * blockHeight * 8;
+        }
+
+        private static Color32[] DownsampleMipPixels(
+            Color32[] parentPixels,
+            int parentWidth,
+            int parentHeight,
+            int mipWidth,
+            int mipHeight)
+        {
+            var mipPixels = new Color32[mipWidth * mipHeight];
+            for (int y = 0; y < mipHeight; y++)
+            {
+                for (int x = 0; x < mipWidth; x++)
+                {
+                    int firstX = Math.Min(parentWidth - 1, x * 2);
+                    int secondX = Math.Min(parentWidth - 1, firstX + 1);
+                    int firstY = Math.Min(parentHeight - 1, y * 2);
+                    int secondY = Math.Min(parentHeight - 1, firstY + 1);
+                    Color32 first = parentPixels[firstY * parentWidth + firstX];
+                    Color32 second = parentPixels[firstY * parentWidth + secondX];
+                    Color32 third = parentPixels[secondY * parentWidth + firstX];
+                    Color32 fourth = parentPixels[secondY * parentWidth + secondX];
+                    mipPixels[y * mipWidth + x] = new Color32(
+                        (byte)((first.r + second.r + third.r + fourth.r + 2) / 4),
+                        (byte)((first.g + second.g + third.g + fourth.g + 2) / 4),
+                        (byte)((first.b + second.b + third.b + fourth.b + 2) / 4),
+                        byte.MaxValue);
+                }
+            }
+
+            return mipPixels;
+        }
+
+        private static void ValidatePixelSimilarity(
+            Color32[] expectedPixels,
+            Color32[] actualPixels,
+            string description)
+        {
+            if (actualPixels.Length != expectedPixels.Length)
+            {
+                throw new InvalidOperationException(
+                    $"Generated {description} must contain {expectedPixels.Length} pixels, " +
+                    $"but contains {actualPixels.Length}.");
+            }
+
+            int maximumChannelError = 0;
+            long totalChannelError = 0;
+            for (int index = 0; index < actualPixels.Length; index++)
+            {
+                AccumulateChannelError(
+                    expectedPixels[index].r,
+                    actualPixels[index].r,
+                    ref maximumChannelError,
+                    ref totalChannelError);
+                AccumulateChannelError(
+                    expectedPixels[index].g,
+                    actualPixels[index].g,
+                    ref maximumChannelError,
+                    ref totalChannelError);
+                AccumulateChannelError(
+                    expectedPixels[index].b,
+                    actualPixels[index].b,
+                    ref maximumChannelError,
+                    ref totalChannelError);
+            }
+
+            float meanChannelError =
+                (float)totalChannelError / (actualPixels.Length * 3);
+            if (maximumChannelError > MaximumDxt1ChannelError ||
+                meanChannelError > MaximumDxt1MeanChannelError)
+            {
+                throw new InvalidOperationException(
+                    $"Generated {description} exceeds the DXT1 visual tolerance: " +
+                    $"maximum RGB error {maximumChannelError}, mean RGB error " +
+                    $"{meanChannelError:F2}.");
+            }
+        }
+
+        private static void AccumulateChannelError(
+            byte expected,
+            byte actual,
+            ref int maximumChannelError,
+            ref long totalChannelError)
+        {
+            int error = Math.Abs(expected - actual);
+            maximumChannelError = Math.Max(maximumChannelError, error);
+            totalChannelError += error;
         }
 
         private static T SaveGeneratedAsset<T>(T generatedAsset, string assetPath)

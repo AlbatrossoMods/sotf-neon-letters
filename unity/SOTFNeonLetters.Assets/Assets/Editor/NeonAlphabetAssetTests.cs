@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using UnityEditor;
 using UnityEngine;
 
@@ -17,6 +18,8 @@ namespace SOTFNeonLetters.Editor
             "Assets/GeneratedSource/NeonLetters_EmissionMask.png";
         private const string GeneratedPrefabFolder = "Assets/Generated/Prefabs";
         private const string GeneratedTextureFolder = "Assets/Generated/Textures";
+        private const string BuilderSourcePath =
+            "Assets/Editor/BuildNeonLetterA.cs";
         private const string WireIngredientName = "Ingredient_Wire_Lead";
         private const string BundleRelativePath = "Build/AssetBundles/Windows/sotfneonletters";
         private const string BuildStartedEpochVariable =
@@ -38,6 +41,8 @@ namespace SOTFNeonLetters.Editor
         private const int CanonicalSignatureSize = 32;
         private const float MaximumCanonicalSignatureDistance = 0.15f;
         private const int RecipeCardMargin = 12;
+        private const int MaximumMipDownsampleChannelError = 160;
+        private const float MaximumMipDownsampleMeanChannelError = 12.0f;
 
         private static readonly PixelRegion TopRecipeCard =
             new PixelRegion(80, 352, 512, 832);
@@ -60,6 +65,14 @@ namespace SOTFNeonLetters.Editor
             RunTest(
                 "canonical emission mask contains luminous pixels",
                 TestCanonicalEmissionMask,
+                failures);
+            RunTest(
+                "texture validation precedes CPU pixel-copy release",
+                TestTextureValidationPrecedesReadabilityRelease,
+                failures);
+            RunTest(
+                "texture validation rejects a corrupted lower mip",
+                TestCorruptedLowerMipIsRejected,
                 failures);
 
             foreach (LetterCase letter in Letters)
@@ -132,6 +145,115 @@ namespace SOTFNeonLetters.Editor
             catch (Exception exception)
             {
                 failures.Add($"{testName}: {exception.Message}");
+            }
+        }
+
+        private static void TestTextureValidationPrecedesReadabilityRelease()
+        {
+            string builderSource = File.ReadAllText(
+                GetAbsoluteProjectPath(BuilderSourcePath));
+            int buildTextureStart = builderSource.IndexOf(
+                "private static void BuildTextureAsset(",
+                StringComparison.Ordinal);
+            int buildTextureEnd = builderSource.IndexOf(
+                "private static T SaveGeneratedAsset<T>(",
+                StringComparison.Ordinal);
+            if (buildTextureStart < 0 || buildTextureEnd <= buildTextureStart)
+            {
+                throw new InvalidOperationException(
+                    "could not isolate the generated texture build path");
+            }
+
+            string buildTextureSource = builderSource.Substring(
+                buildTextureStart,
+                buildTextureEnd - buildTextureStart);
+            int validation = buildTextureSource.IndexOf(
+                "ValidateReadableDxt1Texture(",
+                StringComparison.Ordinal);
+            int readabilityRelease = buildTextureSource.IndexOf(
+                "texture.Apply(false, true)",
+                StringComparison.Ordinal);
+            if (validation < 0 ||
+                readabilityRelease < 0 ||
+                validation >= readabilityRelease)
+            {
+                throw new InvalidOperationException(
+                    "generated DXT1 pixels and mips must be validated before " +
+                    "the CPU pixel copy is released");
+            }
+        }
+
+        private static void TestCorruptedLowerMipIsRejected()
+        {
+            MethodInfo validation = typeof(BuildNeonAlphabet).GetMethod(
+                "ValidateReadableDxt1Texture",
+                BindingFlags.NonPublic | BindingFlags.Static);
+            if (validation == null)
+            {
+                throw new InvalidOperationException(
+                    "the builder has no readable DXT1 mip-chain validator");
+            }
+
+            const int size = 16;
+            var sourcePixels = new Color32[size * size];
+            for (int index = 0; index < sourcePixels.Length; index++)
+            {
+                sourcePixels[index] = new Color32(
+                    byte.MaxValue,
+                    byte.MaxValue,
+                    byte.MaxValue,
+                    byte.MaxValue);
+            }
+
+            var texture = new Texture2D(
+                size,
+                size,
+                TextureFormat.RGB24,
+                true,
+                false);
+            try
+            {
+                texture.SetPixels32(sourcePixels);
+                texture.Apply(true, false);
+                EditorUtility.CompressTexture(
+                    texture,
+                    TextureFormat.DXT1,
+                    TextureCompressionQuality.Best);
+                var corruptedMip = texture.GetPixelData<byte>(2);
+                for (int index = 0; index < corruptedMip.Length; index++)
+                {
+                    corruptedMip[index] = 0;
+                }
+
+                texture.Apply(false, false);
+                Exception rejection = null;
+                try
+                {
+                    validation.Invoke(
+                        null,
+                        new object[]
+                        {
+                            texture,
+                            sourcePixels,
+                            texture.mipmapCount,
+                            "corrupted lower-mip fixture"
+                        });
+                }
+                catch (TargetInvocationException exception)
+                {
+                    rejection = exception.InnerException;
+                }
+
+                if (!(rejection is InvalidOperationException) ||
+                    !rejection.Message.Contains("mip 2"))
+                {
+                    throw new InvalidOperationException(
+                        "the builder accepted a texture with a corrupted lower mip");
+                }
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(texture);
             }
         }
 
@@ -1259,6 +1381,7 @@ namespace SOTFNeonLetters.Editor
             string assetPath = AssetDatabase.GetAssetPath(texture);
             if (!string.IsNullOrEmpty(assetPath))
             {
+                AssertSerializedDxt1MipChain(texture, description);
                 AssertSerializedTextureField(
                     assetPath,
                     "m_IsReadable",
@@ -1277,7 +1400,53 @@ namespace SOTFNeonLetters.Editor
             }
         }
 
+        private static void AssertSerializedDxt1MipChain(
+            Texture2D texture,
+            string description)
+        {
+            Color32[][] mipPixels = ReadSerializedDxt1MipChain(texture);
+            AssertEqual(
+                texture.mipmapCount,
+                mipPixels.Length,
+                $"{description} decoded mip count");
+
+            for (int mipLevel = 1; mipLevel < mipPixels.Length; mipLevel++)
+            {
+                int parentWidth = Math.Max(1, texture.width >> (mipLevel - 1));
+                int parentHeight = Math.Max(1, texture.height >> (mipLevel - 1));
+                int mipWidth = Math.Max(1, texture.width >> mipLevel);
+                int mipHeight = Math.Max(1, texture.height >> mipLevel);
+                AssertMipDownsampleCoherence(
+                    mipPixels[mipLevel - 1],
+                    parentWidth,
+                    parentHeight,
+                    mipPixels[mipLevel],
+                    mipWidth,
+                    mipHeight,
+                    $"{description} mip {mipLevel}");
+            }
+
+            int finalMipLevel = mipPixels.Length - 1;
+            AssertEqual(
+                1,
+                Math.Max(1, texture.width >> finalMipLevel),
+                $"{description} final mip width");
+            AssertEqual(
+                1,
+                Math.Max(1, texture.height >> finalMipLevel),
+                $"{description} final mip height");
+            AssertEqual(
+                1,
+                mipPixels[finalMipLevel].Length,
+                $"{description} final mip pixel count");
+        }
+
         private static Color32[] ReadSerializedDxt1Pixels(Texture2D texture)
+        {
+            return ReadSerializedDxt1MipChain(texture)[0];
+        }
+
+        private static Color32[][] ReadSerializedDxt1MipChain(Texture2D texture)
         {
             string assetPath = AssetDatabase.GetAssetPath(texture);
             if (string.IsNullOrEmpty(assetPath))
@@ -1313,12 +1482,180 @@ namespace SOTFNeonLetters.Editor
             {
                 readableTexture.LoadRawTextureData(payload);
                 readableTexture.Apply(false, false);
-                return readableTexture.GetPixels32();
+                var mipPixels = new Color32[texture.mipmapCount][];
+                int payloadOffset = 0;
+                for (int mipLevel = 0; mipLevel < texture.mipmapCount; mipLevel++)
+                {
+                    int mipWidth = Math.Max(1, texture.width >> mipLevel);
+                    int mipHeight = Math.Max(1, texture.height >> mipLevel);
+                    int expectedByteCount = GetDxt1MipByteCount(mipWidth, mipHeight);
+                    var rawMipData = readableTexture.GetPixelData<byte>(mipLevel);
+                    AssertEqual(
+                        expectedByteCount,
+                        rawMipData.Length,
+                        $"Texture '{texture.name}' mip {mipLevel} DXT1 byte count");
+
+                    if (payloadOffset + expectedByteCount > payload.Length)
+                    {
+                        throw new InvalidOperationException(
+                            $"Texture '{texture.name}' mip {mipLevel} extends beyond " +
+                            "its serialized DXT1 payload.");
+                    }
+
+                    for (int index = 0; index < expectedByteCount; index++)
+                    {
+                        if (rawMipData[index] != payload[payloadOffset + index])
+                        {
+                            throw new InvalidOperationException(
+                                $"Texture '{texture.name}' mip {mipLevel} DXT1 bytes " +
+                                $"are not stored at serialized offset {payloadOffset}.");
+                        }
+                    }
+
+                    Color32[] decodedStoragePixels =
+                        readableTexture.GetPixels32(mipLevel);
+                    int decodedStorageWidth = Math.Max(4, mipWidth);
+                    int decodedStorageHeight = Math.Max(4, mipHeight);
+                    AssertEqual(
+                        decodedStorageWidth * decodedStorageHeight,
+                        decodedStoragePixels.Length,
+                        $"Texture '{texture.name}' mip {mipLevel} decoded storage pixel count");
+                    mipPixels[mipLevel] = CopyLogicalMipPixels(
+                        decodedStoragePixels,
+                        decodedStorageWidth,
+                        mipWidth,
+                        mipHeight);
+                    AssertEqual(
+                        mipWidth * mipHeight,
+                        mipPixels[mipLevel].Length,
+                        $"Texture '{texture.name}' mip {mipLevel} logical " +
+                        $"{mipWidth}x{mipHeight} pixel count");
+                    payloadOffset += expectedByteCount;
+                }
+
+                AssertEqual(
+                    payload.Length,
+                    payloadOffset,
+                    $"Texture '{texture.name}' serialized DXT1 payload length");
+                return mipPixels;
             }
             finally
             {
                 UnityEngine.Object.DestroyImmediate(readableTexture);
             }
+        }
+
+        private static Color32[] CopyLogicalMipPixels(
+            Color32[] storagePixels,
+            int storageWidth,
+            int logicalWidth,
+            int logicalHeight)
+        {
+            var logicalPixels = new Color32[logicalWidth * logicalHeight];
+            for (int y = 0; y < logicalHeight; y++)
+            {
+                Array.Copy(
+                    storagePixels,
+                    y * storageWidth,
+                    logicalPixels,
+                    y * logicalWidth,
+                    logicalWidth);
+            }
+
+            return logicalPixels;
+        }
+
+        private static int GetDxt1MipByteCount(int width, int height)
+        {
+            int blockWidth = Math.Max(1, (width + 3) / 4);
+            int blockHeight = Math.Max(1, (height + 3) / 4);
+            return blockWidth * blockHeight * 8;
+        }
+
+        private static void AssertMipDownsampleCoherence(
+            Color32[] parentPixels,
+            int parentWidth,
+            int parentHeight,
+            Color32[] mipPixels,
+            int mipWidth,
+            int mipHeight,
+            string description)
+        {
+            int maximumChannelError = 0;
+            long totalChannelError = 0;
+            int channelCount = mipPixels.Length * 3;
+
+            for (int y = 0; y < mipHeight; y++)
+            {
+                for (int x = 0; x < mipWidth; x++)
+                {
+                    Color32 expected = AverageParentPixels(
+                        parentPixels,
+                        parentWidth,
+                        parentHeight,
+                        x,
+                        y);
+                    Color32 actual = mipPixels[y * mipWidth + x];
+                    AccumulateChannelError(
+                        expected.r,
+                        actual.r,
+                        ref maximumChannelError,
+                        ref totalChannelError);
+                    AccumulateChannelError(
+                        expected.g,
+                        actual.g,
+                        ref maximumChannelError,
+                        ref totalChannelError);
+                    AccumulateChannelError(
+                        expected.b,
+                        actual.b,
+                        ref maximumChannelError,
+                        ref totalChannelError);
+                }
+            }
+
+            float meanChannelError = (float)totalChannelError / channelCount;
+            if (maximumChannelError > MaximumMipDownsampleChannelError ||
+                meanChannelError > MaximumMipDownsampleMeanChannelError)
+            {
+                throw new InvalidOperationException(
+                    $"{description} is not visually coherent with its parent: " +
+                    $"maximum RGB error {maximumChannelError}, mean RGB error " +
+                    $"{meanChannelError:F2}");
+            }
+        }
+
+        private static Color32 AverageParentPixels(
+            Color32[] pixels,
+            int width,
+            int height,
+            int childX,
+            int childY)
+        {
+            int firstX = Math.Min(width - 1, childX * 2);
+            int secondX = Math.Min(width - 1, firstX + 1);
+            int firstY = Math.Min(height - 1, childY * 2);
+            int secondY = Math.Min(height - 1, firstY + 1);
+            Color32 first = pixels[firstY * width + firstX];
+            Color32 second = pixels[firstY * width + secondX];
+            Color32 third = pixels[secondY * width + firstX];
+            Color32 fourth = pixels[secondY * width + secondX];
+            return new Color32(
+                (byte)((first.r + second.r + third.r + fourth.r + 2) / 4),
+                (byte)((first.g + second.g + third.g + fourth.g + 2) / 4),
+                (byte)((first.b + second.b + third.b + fourth.b + 2) / 4),
+                byte.MaxValue);
+        }
+
+        private static void AccumulateChannelError(
+            byte expected,
+            byte actual,
+            ref int maximumChannelError,
+            ref long totalChannelError)
+        {
+            int error = Math.Abs(expected - actual);
+            maximumChannelError = Math.Max(maximumChannelError, error);
+            totalChannelError += error;
         }
 
         private static int ReadHexNibble(char value)
@@ -1353,11 +1690,7 @@ namespace SOTFNeonLetters.Editor
             string assetPath,
             string fieldName)
         {
-            string projectRoot = Directory.GetParent(Application.dataPath)?.FullName
-                ?? throw new InvalidOperationException("could not resolve Unity project root");
-            string absolutePath = Path.Combine(
-                projectRoot,
-                assetPath.Replace('/', Path.DirectorySeparatorChar));
+            string absolutePath = GetAbsoluteProjectPath(assetPath);
             string prefix = $"  {fieldName}: ";
             string line = File.ReadLines(absolutePath)
                 .SingleOrDefault(candidate => candidate.StartsWith(prefix, StringComparison.Ordinal));
@@ -1368,6 +1701,15 @@ namespace SOTFNeonLetters.Editor
             }
 
             return line.Substring(prefix.Length);
+        }
+
+        private static string GetAbsoluteProjectPath(string assetPath)
+        {
+            string projectRoot = Directory.GetParent(Application.dataPath)?.FullName
+                ?? throw new InvalidOperationException("could not resolve Unity project root");
+            return Path.Combine(
+                projectRoot,
+                assetPath.Replace('/', Path.DirectorySeparatorChar));
         }
 
         private static void AssertLightCorners(
