@@ -71,7 +71,9 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
         try
         {
-            Instance._queuedLoads.Resume();
+            ulong queueSuspensionGeneration =
+                Instance._queuedLoads.SuspendAndClear();
+            Instance._queuedLoads.Resume(queueSuspensionGeneration);
             SdkEvents.AfterLoadSave.Subscribe(Instance.OnAfterLoadSave);
             Lifecycle.CompleteStage(
                 () => SdkEvents.AfterLoadSave.Unsubscribe(
@@ -107,6 +109,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
     internal static void Deinitialize()
     {
         _initialized = false;
+        Instance._queuedLoads.SuspendAndClear();
         Lifecycle.Cleanup(
             exception => RLog.Error(
                 $"[SOTFNeonLetters] Multiplayer persistence cleanup failed: " +
@@ -318,10 +321,11 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         bool rollbackOwnedFallbacks,
         bool resumeLoads)
     {
-        _queuedLoads.SuspendAndClear();
+        ulong queueSuspensionGeneration = _queuedLoads.SuspendAndClear();
         if (_restoreWork.RequestReset(
                 rollbackOwnedFallbacks,
                 resumeLoads,
+                queueSuspensionGeneration,
                 out NeonLetterRestoreResetOwnership ownership))
         {
             PerformReset(ownership);
@@ -362,7 +366,6 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             _afterSpawnReceived = false;
             _restoreReadiness.Reset();
             _restoreUpdateTick = 0;
-            _queuedLoads.SuspendAndClear();
             NeonLetterRestoreResetCompletion completion;
             while (!_restoreWork.TryCompleteReset(
                        ownership,
@@ -389,9 +392,10 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             }
 
             detachedCleanup?.Abandon();
-            if (completion.ResumeLoads && _initialized)
+            if (completion.ResumeLoads)
             {
-                _queuedLoads.Resume();
+                _queuedLoads.Resume(
+                    completion.QueueSuspensionGeneration);
             }
         }
     }

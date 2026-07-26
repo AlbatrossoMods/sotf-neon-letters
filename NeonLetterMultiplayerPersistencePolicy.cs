@@ -246,15 +246,27 @@ internal sealed class NeonLetterMultiplayerRestoreLoadQueue
         NeonLetterMultiplayerSaveEnvelope?,
         NeonLetterMultiplayerRestoreSnapshot> _sanitize;
     private readonly NeonLetterMonotonicSequence _sequences = new();
+    private readonly NeonLetterMonotonicSequence _suspensionGenerations;
     private NeonLetterMultiplayerRestoreSnapshot? _pending;
     private bool _accepting = true;
+    private bool _resumeAllowed;
     private object _generation = new();
     private ulong _latestPublishedSequence;
 
     internal NeonLetterMultiplayerRestoreLoadQueue()
         : this(
             envelope =>
-                NeonLetterMultiplayerRestoreSnapshot.Sanitize(envelope))
+                NeonLetterMultiplayerRestoreSnapshot.Sanitize(envelope),
+            new NeonLetterMonotonicSequence())
+    {
+    }
+
+    internal NeonLetterMultiplayerRestoreLoadQueue(
+        NeonLetterMonotonicSequence suspensionGenerations)
+        : this(
+            envelope =>
+                NeonLetterMultiplayerRestoreSnapshot.Sanitize(envelope),
+            suspensionGenerations)
     {
     }
 
@@ -262,9 +274,20 @@ internal sealed class NeonLetterMultiplayerRestoreLoadQueue
         Func<
             NeonLetterMultiplayerSaveEnvelope?,
             NeonLetterMultiplayerRestoreSnapshot> sanitize)
+        : this(sanitize, new NeonLetterMonotonicSequence())
+    {
+    }
+
+    private NeonLetterMultiplayerRestoreLoadQueue(
+        Func<
+            NeonLetterMultiplayerSaveEnvelope?,
+            NeonLetterMultiplayerRestoreSnapshot> sanitize,
+        NeonLetterMonotonicSequence suspensionGenerations)
     {
         ArgumentNullException.ThrowIfNull(sanitize);
+        ArgumentNullException.ThrowIfNull(suspensionGenerations);
         _sanitize = sanitize;
+        _suspensionGenerations = suspensionGenerations;
     }
 
     internal bool HasPending
@@ -345,21 +368,35 @@ internal sealed class NeonLetterMultiplayerRestoreLoadQueue
         }
     }
 
-    internal void SuspendAndClear()
+    internal ulong SuspendAndClear()
     {
         lock (_sync)
         {
             _accepting = false;
+            _resumeAllowed = false;
             _generation = new object();
             _pending = null;
+            ulong generation = _suspensionGenerations.Advance();
+            _resumeAllowed = true;
+            return generation;
         }
     }
 
-    internal void Resume()
+    internal bool Resume(ulong expectedGeneration)
     {
         lock (_sync)
         {
+            if (expectedGeneration == 0 ||
+                !_resumeAllowed ||
+                _accepting ||
+                expectedGeneration != _suspensionGenerations.Current)
+            {
+                return false;
+            }
+
+            _resumeAllowed = false;
             _accepting = true;
+            return true;
         }
     }
 }

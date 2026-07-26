@@ -14,7 +14,8 @@ internal readonly record struct NeonLetterRestoreResetRequest(
     ulong Version);
 
 internal readonly record struct NeonLetterRestoreResetCompletion(
-    bool ResumeLoads);
+    bool ResumeLoads,
+    ulong QueueSuspensionGeneration);
 
 internal sealed class NeonLetterRestoreWorkOwnership
 {
@@ -25,6 +26,7 @@ internal sealed class NeonLetterRestoreWorkOwnership
     private bool _resetRequested;
     private bool _rollbackOwnedFallbacks;
     private bool _keepLoadsSuspended;
+    private ulong _queueSuspensionGeneration;
 
     internal bool TryBeginUpdate(
         out NeonLetterRestoreUpdateOwnership ownership)
@@ -60,13 +62,23 @@ internal sealed class NeonLetterRestoreWorkOwnership
     internal bool RequestReset(
         bool rollbackOwnedFallbacks,
         bool resumeLoads,
+        ulong queueSuspensionGeneration,
         out NeonLetterRestoreResetOwnership ownership)
     {
+        if (queueSuspensionGeneration == 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(queueSuspensionGeneration),
+                queueSuspensionGeneration,
+                "The queue suspension generation must be nonzero.");
+        }
+
         lock (_sync)
         {
             _resetRequested = true;
             _rollbackOwnedFallbacks |= rollbackOwnedFallbacks;
             _keepLoadsSuspended |= !resumeLoads;
+            _queueSuspensionGeneration = queueSuspensionGeneration;
             _generations.Advance();
             if (_owner != OwnershipKind.None)
             {
@@ -166,12 +178,14 @@ internal sealed class NeonLetterRestoreWorkOwnership
             }
 
             completion = new NeonLetterRestoreResetCompletion(
-                ResumeLoads: !_keepLoadsSuspended);
+                ResumeLoads: !_keepLoadsSuspended,
+                QueueSuspensionGeneration: _queueSuspensionGeneration);
             _owner = OwnershipKind.None;
             _ownerToken = null;
             _resetRequested = false;
             _rollbackOwnedFallbacks = false;
             _keepLoadsSuspended = false;
+            _queueSuspensionGeneration = 0;
             pendingRequest = default;
             return true;
         }

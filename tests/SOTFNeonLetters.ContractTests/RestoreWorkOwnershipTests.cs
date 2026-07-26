@@ -74,11 +74,12 @@ public sealed class RestoreWorkOwnershipTests
     {
         var ownership = new NeonLetterRestoreWorkOwnership();
         var queue = new NeonLetterMultiplayerRestoreLoadQueue();
-        queue.SuspendAndClear();
+        ulong resetQueueGeneration = queue.SuspendAndClear();
         Assert.True(
             ownership.RequestReset(
                 rollbackOwnedFallbacks: true,
                 resumeLoads: false,
+                resetQueueGeneration,
                 out var reset));
         using var callbackBarrier = new Barrier(2);
         using var releaseCallback = new ManualResetEventSlim();
@@ -142,9 +143,11 @@ public sealed class RestoreWorkOwnershipTests
         try
         {
             result = await concurrent.WaitAsync(TestTimeout);
+            ulong secondQueueGeneration = queue.SuspendAndClear();
             secondOwner = ownership.RequestReset(
                 rollbackOwnedFallbacks: true,
                 resumeLoads: false,
+                secondQueueGeneration,
                 out _);
         }
         finally
@@ -188,12 +191,14 @@ public sealed class RestoreWorkOwnershipTests
         bool resetOwnedByRequester = ownership.RequestReset(
             rollbackOwnedFallbacks: true,
             resumeLoads: false,
+            queueSuspensionGeneration: 1,
             out _);
         bool cancellationObserved =
             ownership.TryGetPendingResetRequest(update, out var request);
         bool duplicateOwner = ownership.RequestReset(
             rollbackOwnedFallbacks: true,
             resumeLoads: false,
+            queueSuspensionGeneration: 2,
             out _);
         coordinator.Clear();
         bool transferred =
@@ -280,6 +285,7 @@ public sealed class RestoreWorkOwnershipTests
             ownership.RequestReset(
                 rollbackOwnedFallbacks: false,
                 resumeLoads: true,
+                queueSuspensionGeneration: 1,
                 out var reset));
         int rollbackCount = 0;
         NeonLetterMultiplayerRestoreCoordinator<DisposableTarget> coordinator =
@@ -317,6 +323,7 @@ public sealed class RestoreWorkOwnershipTests
         bool upgradeOwned = ownership.RequestReset(
             rollbackOwnedFallbacks: true,
             resumeLoads: false,
+            queueSuspensionGeneration: 2,
             out _);
         releaseDetached.Set();
         (bool firstCompletion, bool finalCompletion) =
@@ -344,6 +351,7 @@ public sealed class RestoreWorkOwnershipTests
             ownership.RequestReset(
                 rollbackOwnedFallbacks: false,
                 resumeLoads: true,
+                queueSuspensionGeneration: 1,
                 out _));
         Assert.True(
             ownership.TryGetPendingResetRequest(
@@ -356,6 +364,7 @@ public sealed class RestoreWorkOwnershipTests
             ownership.RequestReset(
                 rollbackOwnedFallbacks: true,
                 resumeLoads: false,
+                queueSuspensionGeneration: 2,
                 out _));
         Assert.True(ownership.CompleteUpdate(update, out var reset));
         bool weakCompletion = ownership.TryCompleteReset(
@@ -389,6 +398,7 @@ public sealed class RestoreWorkOwnershipTests
             ownership.RequestReset(
                 rollbackOwnedFallbacks: false,
                 resumeLoads: true,
+                queueSuspensionGeneration: 1,
                 out var reset));
         int rollbackCount = 0;
         NeonLetterMultiplayerRestoreCoordinator<DisposableTarget> coordinator =
@@ -398,9 +408,9 @@ public sealed class RestoreWorkOwnershipTests
         NeonLetterDetachedRestoreCleanup cleanup =
             coordinator.DetachForReset();
 
-        ownership.RequestReset(true, false, out _);
-        ownership.RequestReset(true, false, out _);
-        ownership.RequestReset(true, false, out _);
+        ownership.RequestReset(true, false, 2, out _);
+        ownership.RequestReset(true, false, 3, out _);
+        ownership.RequestReset(true, false, 4, out _);
         Assert.False(
             ownership.TryCompleteReset(
                 reset,
@@ -429,6 +439,7 @@ public sealed class RestoreWorkOwnershipTests
             ownership.RequestReset(
                 rollbackOwnedFallbacks: false,
                 resumeLoads: true,
+                queueSuspensionGeneration: 1,
                 out var weakReset));
         int rollbackCount = 0;
         NeonLetterMultiplayerRestoreCoordinator<DisposableTarget> coordinator =
@@ -450,6 +461,7 @@ public sealed class RestoreWorkOwnershipTests
             ownership.RequestReset(
                 rollbackOwnedFallbacks: true,
                 resumeLoads: false,
+                queueSuspensionGeneration: 2,
                 out var strongReset));
         NeonLetterRestoreResetRequest strongRequest =
             ownership.GetResetRequest(strongReset);
@@ -465,6 +477,113 @@ public sealed class RestoreWorkOwnershipTests
         Assert.Equal(
             (0, 0),
             (rollbackCount, coordinator.PendingCount));
+    }
+
+    [Fact]
+    public async Task CompletedWorldExitCannotResumeQueueAfterDeinitializeAsync()
+    {
+        var queue = new NeonLetterMultiplayerRestoreLoadQueue();
+        var ownership = new NeonLetterRestoreWorkOwnership();
+        ulong worldExitGeneration = queue.SuspendAndClear();
+        Assert.True(
+            ownership.RequestReset(
+                rollbackOwnedFallbacks: false,
+                resumeLoads: true,
+                worldExitGeneration,
+                out var worldExitReset));
+        NeonLetterRestoreResetRequest worldExitRequest =
+            ownership.GetResetRequest(worldExitReset);
+        Assert.True(
+            ownership.TryCompleteReset(
+                worldExitReset,
+                worldExitRequest.Version,
+                rollbackSatisfied: false,
+                out _,
+                out NeonLetterRestoreResetCompletion worldExitCompletion));
+        using var resumeBarrier = new Barrier(2);
+        using var releaseResume = new ManualResetEventSlim();
+        Task<bool> staleResume = Task.Run(
+            () =>
+            {
+                Assert.True(resumeBarrier.SignalAndWait(TestTimeout));
+                Assert.True(releaseResume.Wait(TestTimeout));
+                return queue.Resume(
+                    worldExitCompletion.QueueSuspensionGeneration);
+            });
+        Assert.True(resumeBarrier.SignalAndWait(TestTimeout));
+
+        bool resumed;
+        ulong deinitializeGeneration;
+        NeonLetterRestoreResetCompletion deinitializeCompletion;
+        try
+        {
+            deinitializeGeneration = queue.SuspendAndClear();
+            Assert.True(
+                ownership.RequestReset(
+                    rollbackOwnedFallbacks: true,
+                    resumeLoads: false,
+                    deinitializeGeneration,
+                    out var deinitializeReset));
+            NeonLetterRestoreResetRequest deinitializeRequest =
+                ownership.GetResetRequest(deinitializeReset);
+            Assert.True(
+                ownership.TryCompleteReset(
+                    deinitializeReset,
+                    deinitializeRequest.Version,
+                    rollbackSatisfied: true,
+                    out _,
+                    out deinitializeCompletion));
+        }
+        finally
+        {
+            releaseResume.Set();
+        }
+
+        resumed = await staleResume.WaitAsync(TestTimeout);
+        bool loadAccepted = queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
+
+        Assert.Equal(
+            (false, false, false, true),
+            (
+                resumed,
+                loadAccepted,
+                deinitializeCompletion.ResumeLoads,
+                deinitializeCompletion.QueueSuspensionGeneration ==
+                deinitializeGeneration));
+    }
+
+    [Fact]
+    public void CompletedWorldExitResumesMatchingQueueSuspension()
+    {
+        var queue = new NeonLetterMultiplayerRestoreLoadQueue();
+        var ownership = new NeonLetterRestoreWorkOwnership();
+        ulong suspensionGeneration = queue.SuspendAndClear();
+        Assert.True(
+            ownership.RequestReset(
+                rollbackOwnedFallbacks: false,
+                resumeLoads: true,
+                suspensionGeneration,
+                out var reset));
+        NeonLetterRestoreResetRequest request =
+            ownership.GetResetRequest(reset);
+        Assert.True(
+            ownership.TryCompleteReset(
+                reset,
+                request.Version,
+                rollbackSatisfied: false,
+                out _,
+                out NeonLetterRestoreResetCompletion completion));
+
+        bool resumed = queue.Resume(
+            completion.QueueSuspensionGeneration);
+        bool loadAccepted = queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
+
+        Assert.Equal(
+            (true, true, suspensionGeneration),
+            (
+                resumed,
+                loadAccepted,
+                completion.QueueSuspensionGeneration));
     }
 
     private static NeonLetterMultiplayerSaveEnvelope CreateEnvelope(

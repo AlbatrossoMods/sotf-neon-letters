@@ -168,8 +168,8 @@ public sealed class MultiplayerRestoreLoadQueueTests
 
         queue.SuspendAndClear();
         coordinator.Clear();
-        queue.SuspendAndClear();
-        queue.Resume();
+        ulong latestGeneration = queue.SuspendAndClear();
+        queue.Resume(latestGeneration);
 
         Assert.False(queue.TryDequeue(out _));
     }
@@ -410,8 +410,8 @@ public sealed class MultiplayerRestoreLoadQueueTests
 
         try
         {
-            queue.SuspendAndClear();
-            queue.Resume();
+            ulong suspensionGeneration = queue.SuspendAndClear();
+            queue.Resume(suspensionGeneration);
         }
         finally
         {
@@ -423,6 +423,49 @@ public sealed class MultiplayerRestoreLoadQueueTests
         Assert.Equal(
             (false, false),
             (accepted, queue.TryDequeue(out _)));
+    }
+
+    [Fact]
+    public void OnlyLatestSuspensionCanResumeQueue()
+    {
+        var queue = new NeonLetterMultiplayerRestoreLoadQueue();
+        ulong firstGeneration = queue.SuspendAndClear();
+        ulong secondGeneration = queue.SuspendAndClear();
+
+        bool staleResume = queue.Resume(firstGeneration);
+        bool latestResume = queue.Resume(secondGeneration);
+        bool duplicateResume = queue.Resume(secondGeneration);
+        bool loadAccepted = queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
+
+        Assert.Equal(
+            (false, true, false, true, true, true),
+            (
+                staleResume,
+                latestResume,
+                duplicateResume,
+                loadAccepted,
+                firstGeneration > 0,
+                secondGeneration > firstGeneration));
+    }
+
+    [Fact]
+    public void ExhaustedSuspensionGenerationKeepsQueueClosed()
+    {
+        var generations =
+            new NeonLetterMonotonicSequence(ulong.MaxValue - 1);
+        var queue =
+            new NeonLetterMultiplayerRestoreLoadQueue(generations);
+        ulong finalGeneration = queue.SuspendAndClear();
+        Assert.True(queue.Resume(finalGeneration));
+
+        Assert.Throws<InvalidOperationException>(
+            () => queue.SuspendAndClear());
+        bool staleResume = queue.Resume(finalGeneration);
+        bool loadAccepted = queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
+
+        Assert.Equal(
+            (ulong.MaxValue, false, false),
+            (finalGeneration, staleResume, loadAccepted));
     }
 
     private static NeonLetterMultiplayerRestoreCoordinator<RestoreTarget>
