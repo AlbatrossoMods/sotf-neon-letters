@@ -600,31 +600,55 @@ internal static class NeonLetterPeerDelivery
 internal sealed class NeonLetterDeferredDisconnects<TKey>
     where TKey : notnull
 {
-    private readonly HashSet<TKey> _pending = new();
-    private readonly HashSet<TKey> _reportedFailures = new();
+    public const int InitialRetryDelayUpdates = 1;
+    public const int MaxRetryDelayUpdates = 64;
+
+    private readonly Dictionary<
+        TKey,
+        LinkedListNode<PendingDisconnect>> _byKey = new();
+    private readonly LinkedList<PendingDisconnect> _pending = new();
 
     public int Count => _pending.Count;
 
     public void Schedule(TKey key)
     {
-        _pending.Add(key);
+        if (_byKey.ContainsKey(key))
+        {
+            return;
+        }
+
+        LinkedListNode<PendingDisconnect> node =
+            _pending.AddLast(new PendingDisconnect(key));
+        _byKey.Add(key, node);
     }
 
-    public bool Contains(TKey key)
+    public bool IsQuarantined(TKey key)
     {
-        return _pending.Contains(key);
+        return _byKey.ContainsKey(key);
+    }
+
+    public bool AllowsAcceptedTraffic(
+        TKey key,
+        Func<TKey, bool> isAccepted)
+    {
+        ArgumentNullException.ThrowIfNull(isAccepted);
+        return !IsQuarantined(key) && isAccepted(key);
     }
 
     public void Remove(TKey key)
     {
-        _pending.Remove(key);
-        _reportedFailures.Remove(key);
+        if (_byKey.TryGetValue(
+                key,
+                out LinkedListNode<PendingDisconnect>? node))
+        {
+            RemoveNode(node);
+        }
     }
 
     public void Clear()
     {
+        _byKey.Clear();
         _pending.Clear();
-        _reportedFailures.Clear();
     }
 
     public void Drain(
@@ -636,27 +660,71 @@ internal sealed class NeonLetterDeferredDisconnects<TKey>
         ArgumentNullException.ThrowIfNull(execute);
         ArgumentNullException.ThrowIfNull(onFirstFailure);
 
-        foreach (TKey key in _pending.ToArray())
+        LinkedListNode<PendingDisconnect>? node = _pending.First;
+        while (node != null)
         {
-            if (!exists(key))
+            LinkedListNode<PendingDisconnect>? next = node.Next;
+            PendingDisconnect pending = node.Value;
+            if (!exists(pending.Key))
             {
-                Remove(key);
+                RemoveNode(node);
+                node = next;
+                continue;
+            }
+
+            if (pending.UpdatesUntilAttempt > 0)
+            {
+                pending.UpdatesUntilAttempt--;
+                node.Value = pending;
+                node = next;
                 continue;
             }
 
             try
             {
-                execute(key);
-                Remove(key);
+                execute(pending.Key);
+                RemoveNode(node);
             }
             catch (Exception exception)
             {
-                if (_reportedFailures.Add(key))
+                pending.UpdatesUntilAttempt =
+                    pending.RetryDelayUpdates - 1;
+                pending.RetryDelayUpdates = Math.Min(
+                    pending.RetryDelayUpdates * 2,
+                    MaxRetryDelayUpdates);
+                bool reportFailure = !pending.FailureReported;
+                pending.FailureReported = true;
+                node.Value = pending;
+                if (reportFailure)
                 {
-                    onFirstFailure(key, exception);
+                    onFirstFailure(pending.Key, exception);
                 }
             }
+
+            node = next;
         }
+    }
+
+    private void RemoveNode(LinkedListNode<PendingDisconnect> node)
+    {
+        _pending.Remove(node);
+        _byKey.Remove(node.Value.Key);
+    }
+
+    private struct PendingDisconnect
+    {
+        public PendingDisconnect(TKey key)
+        {
+            Key = key;
+            RetryDelayUpdates = InitialRetryDelayUpdates;
+            UpdatesUntilAttempt = 0;
+            FailureReported = false;
+        }
+
+        public TKey Key { get; }
+        public int RetryDelayUpdates { get; set; }
+        public int UpdatesUntilAttempt { get; set; }
+        public bool FailureReported { get; set; }
     }
 }
 

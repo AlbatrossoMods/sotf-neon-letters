@@ -277,45 +277,89 @@ public sealed class MultiplayerSessionProtocolTests
                 string.Join(",", attempted),
                 string.Join(",", received),
                 disconnects.Count,
-                disconnects.Contains("middle")));
+                disconnects.IsQuarantined("middle")));
     }
 
     [Fact]
-    public void DeferredDisconnectRetriesTransientFailureWithoutRepeatedLogging()
+    public void DeferredDisconnectUsesCappedExponentialUpdateBackoff()
+    {
+        var deferred = new NeonLetterDeferredDisconnects<string>();
+        deferred.Schedule("peer");
+        var attemptUpdates = new List<int>();
+        int failureLogs = 0;
+
+        for (int update = 1; update <= 256; update++)
+        {
+            int currentUpdate = update;
+            deferred.Drain(
+                exists: _ => true,
+                execute: _ =>
+                {
+                    attemptUpdates.Add(currentUpdate);
+                    throw new InvalidOperationException("persistent failure");
+                },
+                onFirstFailure: (_, _) => failureLogs++);
+        }
+
+        Assert.Equal(
+            ("1,2,4,8,16,32,64,128,192,256", 1, 1),
+            (
+                string.Join(",", attemptUpdates),
+                failureLogs,
+                deferred.Count));
+    }
+
+    [Fact]
+    public void DeferredDisconnectSucceedsAfterTransientFailures()
+    {
+        var deferred = new NeonLetterDeferredDisconnects<string>();
+        deferred.Schedule("peer");
+        var attemptUpdates = new List<int>();
+        int failureLogs = 0;
+
+        for (int update = 1; update <= 4; update++)
+        {
+            int currentUpdate = update;
+            deferred.Drain(
+                exists: _ => true,
+                execute: _ =>
+                {
+                    attemptUpdates.Add(currentUpdate);
+                    if (attemptUpdates.Count < 3)
+                    {
+                        throw new InvalidOperationException(
+                            "transient failure");
+                    }
+                },
+                onFirstFailure: (_, _) => failureLogs++);
+        }
+
+        Assert.Equal(
+            ("1,2,4", 1, 0),
+            (string.Join(",", attemptUpdates), failureLogs, deferred.Count));
+    }
+
+    [Fact]
+    public void PermanentDisconnectFailureHasBoundedAttemptsOverManyUpdates()
     {
         var deferred = new NeonLetterDeferredDisconnects<string>();
         deferred.Schedule("peer");
         int attempts = 0;
         int failureLogs = 0;
 
-        deferred.Drain(
-            exists: _ => true,
-            execute: _ =>
-            {
-                attempts++;
-                throw new InvalidOperationException("first failure");
-            },
-            onFirstFailure: (_, _) => failureLogs++);
-        (int Pending, int Logs) afterFirst =
-            (deferred.Count, failureLogs);
-        deferred.Drain(
-            exists: _ => true,
-            execute: _ =>
-            {
-                attempts++;
-                throw new InvalidOperationException("repeated failure");
-            },
-            onFirstFailure: (_, _) => failureLogs++);
-        (int Pending, int Logs) afterSecond =
-            (deferred.Count, failureLogs);
-        deferred.Drain(
-            exists: _ => true,
-            execute: _ => attempts++,
-            onFirstFailure: (_, _) => failureLogs++);
+        for (int update = 1; update <= 10_000; update++)
+        {
+            deferred.Drain(
+                exists: _ => true,
+                execute: _ =>
+                {
+                    attempts++;
+                    throw new InvalidOperationException("persistent failure");
+                },
+                onFirstFailure: (_, _) => failureLogs++);
+        }
 
-        Assert.Equal(
-            ((1, 1), (1, 1), 3, 0),
-            (afterFirst, afterSecond, attempts, deferred.Count));
+        Assert.Equal((162, 1, 1), (attempts, failureLogs, deferred.Count));
     }
 
     [Fact]
@@ -332,6 +376,66 @@ public sealed class MultiplayerSessionProtocolTests
             onFirstFailure: (_, _) => failureLogs++);
 
         Assert.Equal((0, 0, 0), (deferred.Count, attempts, failureLogs));
+    }
+
+    [Fact]
+    public void ScheduledDisconnectQuarantinesAcceptedPeerTraffic()
+    {
+        string[] peers = { "first", "middle", "third" };
+        var deferred = new NeonLetterDeferredDisconnects<string>();
+        var received = new List<string>();
+        deferred.Schedule("middle");
+
+        NeonLetterPeerDelivery.Deliver(
+            peers,
+            isAccepted: peer => deferred.AllowsAcceptedTraffic(
+                peer,
+                _ => true),
+            send: received.Add,
+            onFailure: (_, _) => { });
+        bool receiveAllowed = deferred.AllowsAcceptedTraffic(
+            "middle",
+            _ => true);
+
+        Assert.Equal(
+            ("first,third", false, true),
+            (
+                string.Join(",", received),
+                receiveAllowed,
+                deferred.IsQuarantined("middle")));
+    }
+
+    [Fact]
+    public void SessionCleanupClearsDisconnectQuarantineAndRetryState()
+    {
+        var deferred = new NeonLetterDeferredDisconnects<string>();
+        deferred.Schedule("peer");
+        int attempts = 0;
+        int failureLogs = 0;
+        deferred.Drain(
+            exists: _ => true,
+            execute: _ =>
+            {
+                attempts++;
+                throw new InvalidOperationException("transient failure");
+            },
+            onFirstFailure: (_, _) => failureLogs++);
+
+        deferred.Clear();
+        bool quarantinedAfterCleanup = deferred.IsQuarantined("peer");
+        deferred.Schedule("peer");
+        deferred.Drain(
+            exists: _ => true,
+            execute: _ => attempts++,
+            onFirstFailure: (_, _) => failureLogs++);
+
+        Assert.Equal(
+            (false, 2, 1, 0),
+            (
+                quarantinedAfterCleanup,
+                attempts,
+                failureLogs,
+                deferred.Count));
     }
 
     [Fact]

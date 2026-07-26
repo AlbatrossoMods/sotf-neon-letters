@@ -96,7 +96,7 @@ internal static partial class NeonLetterMultiplayerRuntime
     private static void AdvanceClientHandshake(double nowSeconds)
     {
         if (ClientSession.IsAccepted ||
-            DeferredClientDisconnects.Contains(ClientDisconnectKey))
+            DeferredClientDisconnects.IsQuarantined(ClientDisconnectKey))
         {
             return;
         }
@@ -133,13 +133,23 @@ internal static partial class NeonLetterMultiplayerRuntime
     private static void DrainDeferredDisconnects()
     {
         DeferredClientDisconnects.Drain(
-            exists: _ => BoltNetwork.server != null,
-            execute: _ => BoltNetwork.server.Disconnect(),
-            onFirstFailure: LogClientDisconnectFailure);
+            ClientDisconnectExistsCallback,
+            DisconnectClientCallback,
+            LogClientDisconnectFailureCallback);
         DeferredDisconnects.Drain(
-            HostConnections.Contains,
-            connection => connection.Disconnect(),
-            LogHostDisconnectFailure);
+            HostConnectionExistsCallback,
+            DisconnectHostConnectionCallback,
+            LogHostDisconnectFailureCallback);
+    }
+
+    private static bool ClientDisconnectExists(byte _)
+    {
+        return BoltNetwork.server != null;
+    }
+
+    private static void DisconnectClient(byte _)
+    {
+        BoltNetwork.server.Disconnect();
     }
 
     private static void LogClientDisconnectFailure(
@@ -181,6 +191,7 @@ internal static partial class NeonLetterMultiplayerRuntime
         if (!BoltNetwork.isRunning ||
             !NetUtils.IsServer ||
             fromConnection == null ||
+            DeferredDisconnects.IsQuarantined(fromConnection) ||
             _hostHandshakes == null)
         {
             return;
@@ -311,7 +322,19 @@ internal static partial class NeonLetterMultiplayerRuntime
         return BoltNetwork.isRunning &&
             NetUtils.IsServer &&
             fromConnection != null &&
-            _hostHandshakes?.IsAccepted(fromConnection) == true;
+            IsAcceptedForModTraffic(fromConnection);
+    }
+
+    private static bool IsAcceptedForModTraffic(BoltConnection connection)
+    {
+        return DeferredDisconnects.AllowsAcceptedTraffic(
+            connection,
+            IsHostHandshakeAcceptedCallback);
+    }
+
+    private static bool IsHostHandshakeAccepted(BoltConnection connection)
+    {
+        return _hostHandshakes?.IsAccepted(connection) == true;
     }
 
     private static void StartClientHandshake()

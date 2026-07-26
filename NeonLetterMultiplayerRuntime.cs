@@ -79,6 +79,23 @@ internal static partial class NeonLetterMultiplayerRuntime
         ApplyReplicatedColorCallback = ApplyReplicatedColor;
     private static readonly Action<ulong, Exception>
         PendingColorApplyErrorCallback = LogPendingColorApplyError;
+    private static readonly Func<BoltConnection, bool>
+        IsHostHandshakeAcceptedCallback = IsHostHandshakeAccepted;
+    private static readonly Func<BoltConnection, bool>
+        IsAcceptedForModTrafficCallback = IsAcceptedForModTraffic;
+    private static readonly Func<byte, bool>
+        ClientDisconnectExistsCallback = ClientDisconnectExists;
+    private static readonly Action<byte>
+        DisconnectClientCallback = DisconnectClient;
+    private static readonly Action<byte, Exception>
+        LogClientDisconnectFailureCallback = LogClientDisconnectFailure;
+    private static readonly Func<BoltConnection, bool>
+        HostConnectionExistsCallback = HostConnections.Contains;
+    private static readonly Action<BoltConnection>
+        DisconnectHostConnectionCallback =
+            static connection => connection.Disconnect();
+    private static readonly Action<BoltConnection, Exception>
+        LogHostDisconnectFailureCallback = LogHostDisconnectFailure;
     private static bool _changeRequestRegistered;
     private static bool _changeResultRegistered;
     private static bool _colorStateRegistered;
@@ -1163,7 +1180,7 @@ internal static partial class NeonLetterMultiplayerRuntime
             (Action<BoltConnection>)(connection => connections.Add(connection)));
         NeonLetterPeerDelivery.Deliver(
             connections,
-            _hostHandshakes.IsAccepted,
+            IsAcceptedForModTrafficCallback,
             connection => ColorState.SendToClient(
                 networkId,
                 color,
