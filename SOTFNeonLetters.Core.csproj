@@ -20,6 +20,7 @@
         <Compile Include="NeonLetterMultiplayerPersistencePolicy.cs" />
         <Compile Include="NeonLetterSnapshotRequestScheduler.cs" />
         <Compile Include="NeonLetterColorPersistencePolicy.cs" />
+        <Compile Include="NeonLetterSinglePlayerRestoreCoordinator.cs" />
         <Compile Include="NeonLetterRuntimePolicy.cs" />
         <Compile Include="NeonLetterDismantleRefundPolicy.cs" />
         <Compile Include="NeonLetterLifecyclePolicy.cs" />

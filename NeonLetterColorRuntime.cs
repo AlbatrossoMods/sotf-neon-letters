@@ -1,4 +1,3 @@
-using System.Collections;
 using Bolt;
 using RedLoader;
 using Sons.Crafting.Structures;
@@ -17,6 +16,14 @@ public static class NeonLetterColorRuntime
     private static readonly NeonLetterColorSaveState PersistentColors = new();
     private static readonly NeonLetterColorSaveable Saveable = new();
     private static readonly NeonLetterLifecycleCoordinator Lifecycle = new();
+    private static readonly NeonLetterSinglePlayerRestoreLifecycle
+        RestoreLifecycle = new();
+    private static readonly Func<
+        NeonLetterColorSaveEntry,
+        NeonLetterSinglePlayerRestoreAttemptResult>
+        TryRestorePersistentColorCallback = TryRestorePersistentColor;
+    private static readonly Action<Exception> LogRestoreErrorCallback =
+        LogRestoreError;
     private static readonly NeonLetterEmissionBindingCache<
         GameObject,
         NeonLetterSmallDefinition,
@@ -24,7 +31,6 @@ public static class NeonLetterColorRuntime
             IsStructureRootAlive,
             CreateEmissionBinding);
     private static bool _initialized;
-    private static bool _restoreQueued;
 
     public static void Initialize()
     {
@@ -61,6 +67,11 @@ public static class NeonLetterColorRuntime
                 () => SdkEvents.AfterLoadSave.Unsubscribe(
                     QueuePersistentColorRestore));
 
+            SdkEvents.OnInWorldUpdate.Subscribe(AdvancePersistentColorRestore);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.OnInWorldUpdate.Unsubscribe(
+                    AdvancePersistentColorRestore));
+
             SonsSaveTools.Register(Saveable);
             Lifecycle.CompleteStage(
                 () => SonsSaveTools.Unregister(Saveable));
@@ -82,7 +93,7 @@ public static class NeonLetterColorRuntime
         SessionColors.Clear();
         PersistentColors.Clear();
         EmissionBindings.Clear();
-        _restoreQueued = false;
+        RestoreLifecycle.Deinitialize();
     }
 
     internal static NeonRgba ResolveSessionColor(int instanceId)
@@ -248,21 +259,18 @@ public static class NeonLetterColorRuntime
 
     private static void QueuePersistentColorRestore()
     {
-        if (_restoreQueued)
-        {
-            return;
-        }
-
-        _restoreQueued = true;
-        RestorePersistentColorsNextFrame().RunCoro();
+        RestoreLifecycle.SetSinglePlayerRole(IsSinglePlayerRole());
+        RestoreLifecycle.Stage(
+            PersistentColors.Save(),
+            Time.realtimeSinceStartupAsDouble);
     }
 
-    private static IEnumerator RestorePersistentColorsNextFrame()
+    private static void AdvancePersistentColorRestore()
     {
-        yield return null;
-
-        _restoreQueued = false;
-        RestorePersistentColors();
+        RestoreLifecycle.SetSinglePlayerRole(IsSinglePlayerRole());
+        RestoreLifecycle.Advance(
+            Time.realtimeSinceStartupAsDouble,
+            TryRestorePersistentColorCallback);
     }
 
     private static void OnWorldExited()
@@ -280,49 +288,112 @@ public static class NeonLetterColorRuntime
             SessionColors.Clear();
             PersistentColors.Clear();
             EmissionBindings.Clear();
-            _restoreQueued = false;
+            RestoreLifecycle.OnWorldExited();
         }
     }
 
-    private static void RestorePersistentColors()
+    private static NeonLetterSinglePlayerRestoreAttemptResult
+        TryRestorePersistentColor(NeonLetterColorSaveEntry entry)
     {
-        NeonLetterColorSaveEnvelope snapshot = PersistentColors.Save();
-        int restoredCount = NeonLetterColorRestoreCoordinator.Restore(
-            snapshot,
-            ResolveRestoreTarget,
-            exception => RLog.Error(
-                $"[SOTFNeonLetters] Failed to restore one saved neon color: " +
-                $"{exception}"));
-        RLog.Msg(
-            $"[SOTFNeonLetters] Restored {restoredCount} saved neon letter color(s).");
+        try
+        {
+            NeonLetterSinglePlayerRestoreTargetObservation observation =
+                ObserveRestoreTarget(entry);
+            return NeonLetterSinglePlayerRestoreAttemptPolicy.TryApply(
+                entry,
+                observation,
+                LogRestoreErrorCallback);
+        }
+        catch (Exception exception)
+        {
+            LogRestoreError(exception);
+            return NeonLetterSinglePlayerRestoreAttemptResult.Terminal;
+        }
     }
 
-    private static INeonLetterColorRestoreTarget ResolveRestoreTarget(int saveId)
+    private static NeonLetterSinglePlayerRestoreTargetObservation
+        ObserveRestoreTarget(NeonLetterColorSaveEntry entry)
     {
+        if (!ScrewStructureManager.TryGetInstance(
+                out ScrewStructureManager manager) ||
+            manager._structures == null ||
+            manager._isLoadingSave)
+        {
+            return new NeonLetterSinglePlayerRestoreTargetObservation(
+                NeonLetterSinglePlayerRestoreTargetObservationKind
+                    .ManagerUnavailable);
+        }
+
         if (!ScrewStructureManager.TryGetStructureBySaveID(
-                saveId,
+                entry.SaveId,
                 out IScrewStructure structure) ||
             structure == null)
         {
-            return null;
+            return new NeonLetterSinglePlayerRestoreTargetObservation(
+                NeonLetterSinglePlayerRestoreTargetObservationKind
+                    .TargetUnavailable);
         }
 
         ScrewStructure concreteStructure = structure.TryCast<ScrewStructure>();
-        IScrewStructureSaveID saveIdentity = structure.TryCast<IScrewStructureSaveID>();
+        IScrewStructureSaveID saveIdentity =
+            structure.TryCast<IScrewStructureSaveID>();
         StructureRecipe recipe = structure.Recipe;
         if (concreteStructure == null ||
             saveIdentity == null ||
-            saveIdentity.SaveId != saveId ||
+            saveIdentity.SaveId != entry.SaveId ||
             recipe == null)
         {
-            return null;
+            return new NeonLetterSinglePlayerRestoreTargetObservation(
+                NeonLetterSinglePlayerRestoreTargetObservationKind.Resolved,
+                Target: null,
+                recipe?.Id);
         }
 
-        NeonLetterSmallDefinition definition = NeonLetterSmallCatalog.All.FirstOrDefault(
-            candidate => candidate.RecipeId == recipe.Id);
-        return definition == null
+        NeonLetterSmallDefinition definition =
+            ResolveRestoreDefinition(recipe.Id);
+        INeonLetterColorRestoreTarget target = definition == null
             ? null
             : new UnityColorRestoreTarget(concreteStructure, definition);
+        return new NeonLetterSinglePlayerRestoreTargetObservation(
+            NeonLetterSinglePlayerRestoreTargetObservationKind.Resolved,
+            target,
+            recipe.Id);
+    }
+
+    private static bool IsSinglePlayerRole()
+    {
+        return !NetUtils.IsMultiplayer && !BoltNetwork.isRunning;
+    }
+
+    private static NeonLetterSmallDefinition ResolveRestoreDefinition(
+        int recipeId)
+    {
+        IReadOnlyList<NeonLetterSmallDefinition> definitions =
+            NeonLetterSmallCatalog.All;
+        for (int index = 0; index < definitions.Count; index++)
+        {
+            NeonLetterSmallDefinition definition = definitions[index];
+            if (definition.RecipeId == recipeId)
+            {
+                return definition;
+            }
+        }
+
+        return null;
+    }
+
+    private static void LogRestoreError(Exception exception)
+    {
+        try
+        {
+            RLog.Error(
+                $"[SOTFNeonLetters] Failed to restore one saved neon color: " +
+                $"{exception}");
+        }
+        catch
+        {
+            // Logging cannot make a terminal restore safe to retry.
+        }
     }
 
     private static bool IsStructureRootAlive(GameObject structureRoot)
