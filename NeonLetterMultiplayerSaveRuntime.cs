@@ -72,7 +72,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         try
         {
             ulong queueSuspensionGeneration =
-                Instance._queuedLoads.SuspendAndClear();
+                Instance._queuedLoads.ResetForInitialization();
             Instance._queuedLoads.Resume(queueSuspensionGeneration);
             SdkEvents.AfterLoadSave.Subscribe(Instance.OnAfterLoadSave);
             Lifecycle.CompleteStage(
@@ -109,12 +109,13 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
     internal static void Deinitialize()
     {
         _initialized = false;
-        Instance._queuedLoads.SuspendAndClear();
+        ulong queueSuspensionGeneration =
+            Instance._queuedLoads.SealAndClear();
         Lifecycle.Cleanup(
             exception => RLog.Error(
                 $"[SOTFNeonLetters] Multiplayer persistence cleanup failed: " +
                 exception));
-        Instance.OnDeinitialized();
+        Instance.OnDeinitialized(queueSuspensionGeneration);
     }
 
     public NeonLetterMultiplayerSaveEnvelope Save()
@@ -305,23 +306,27 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
     private void OnWorldExited()
     {
+        ulong queueSuspensionGeneration =
+            _queuedLoads.SuspendAndClear();
         ResetRuntimeState(
             rollbackOwnedFallbacks: false,
-            resumeLoads: true);
+            resumeLoads: true,
+            queueSuspensionGeneration);
     }
 
-    private void OnDeinitialized()
+    private void OnDeinitialized(ulong queueSuspensionGeneration)
     {
         ResetRuntimeState(
             rollbackOwnedFallbacks: true,
-            resumeLoads: false);
+            resumeLoads: false,
+            queueSuspensionGeneration);
     }
 
     private void ResetRuntimeState(
         bool rollbackOwnedFallbacks,
-        bool resumeLoads)
+        bool resumeLoads,
+        ulong queueSuspensionGeneration)
     {
-        ulong queueSuspensionGeneration = _queuedLoads.SuspendAndClear();
         if (_restoreWork.RequestReset(
                 rollbackOwnedFallbacks,
                 resumeLoads,
@@ -396,6 +401,10 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             {
                 _queuedLoads.Resume(
                     completion.QueueSuspensionGeneration);
+            }
+            else
+            {
+                _queuedLoads.SuspendAndClear();
             }
         }
     }

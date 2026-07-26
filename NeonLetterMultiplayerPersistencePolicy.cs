@@ -250,6 +250,7 @@ internal sealed class NeonLetterMultiplayerRestoreLoadQueue
     private NeonLetterMultiplayerRestoreSnapshot? _pending;
     private bool _accepting = true;
     private bool _resumeAllowed;
+    private bool _sealed;
     private object _generation = new();
     private ulong _latestPublishedSequence;
 
@@ -377,6 +378,34 @@ internal sealed class NeonLetterMultiplayerRestoreLoadQueue
             _generation = new object();
             _pending = null;
             ulong generation = _suspensionGenerations.Advance();
+            _resumeAllowed = !_sealed;
+            return generation;
+        }
+    }
+
+    internal ulong SealAndClear()
+    {
+        lock (_sync)
+        {
+            _accepting = false;
+            _resumeAllowed = false;
+            _sealed = true;
+            _generation = new object();
+            _pending = null;
+            return _suspensionGenerations.Advance();
+        }
+    }
+
+    internal ulong ResetForInitialization()
+    {
+        lock (_sync)
+        {
+            _accepting = false;
+            _resumeAllowed = false;
+            _generation = new object();
+            _pending = null;
+            ulong generation = _suspensionGenerations.Advance();
+            _sealed = false;
             _resumeAllowed = true;
             return generation;
         }
@@ -387,6 +416,7 @@ internal sealed class NeonLetterMultiplayerRestoreLoadQueue
         lock (_sync)
         {
             if (expectedGeneration == 0 ||
+                _sealed ||
                 !_resumeAllowed ||
                 _accepting ||
                 expectedGeneration != _suspensionGenerations.Current)

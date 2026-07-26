@@ -3930,7 +3930,10 @@ void CheckColorRuntimeSafetyContract()
     CheckEqual(
         true,
         multiplayerSaveRuntimeSource.Contains(
-            "Instance.OnDeinitialized();",
+            "Instance._queuedLoads.SealAndClear()",
+            StringComparison.Ordinal) &&
+        multiplayerSaveRuntimeSource.Contains(
+            "Instance.OnDeinitialized(queueSuspensionGeneration);",
             StringComparison.Ordinal),
         "active-world deinitialization uses explicit owned-fallback cleanup");
     CheckEqual(

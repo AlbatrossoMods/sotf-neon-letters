@@ -459,13 +459,40 @@ public sealed class MultiplayerRestoreLoadQueueTests
         Assert.True(queue.Resume(finalGeneration));
 
         Assert.Throws<InvalidOperationException>(
-            () => queue.SuspendAndClear());
+            () => queue.SealAndClear());
         bool staleResume = queue.Resume(finalGeneration);
         bool loadAccepted = queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
 
         Assert.Equal(
             (ulong.MaxValue, false, false),
             (finalGeneration, staleResume, loadAccepted));
+    }
+
+    [Fact]
+    public void SealedQueueRejectsEveryResumeUntilFreshInitialization()
+    {
+        var queue = new NeonLetterMultiplayerRestoreLoadQueue();
+        ulong suspendedGeneration = queue.SuspendAndClear();
+        ulong sealedGeneration = queue.SealAndClear();
+
+        bool suspendedResume = queue.Resume(suspendedGeneration);
+        bool sealedResume = queue.Resume(sealedGeneration);
+        bool sealedLoad = queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
+        ulong initializationGeneration = queue.ResetForInitialization();
+        bool staleResume = queue.Resume(sealedGeneration);
+        bool initializationResume = queue.Resume(initializationGeneration);
+        bool initializedLoad = queue.Enqueue(CreateEnvelope(nativeSaveId: 2));
+
+        Assert.Equal(
+            (false, false, false, false, true, true, true),
+            (
+                suspendedResume,
+                sealedResume,
+                sealedLoad,
+                staleResume,
+                initializationResume,
+                initializedLoad,
+                initializationGeneration > sealedGeneration));
     }
 
     private static NeonLetterMultiplayerRestoreCoordinator<RestoreTarget>
