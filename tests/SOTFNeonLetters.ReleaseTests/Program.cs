@@ -79,7 +79,30 @@ void CheckReleaseAssemblyPaths()
     string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
     byte[] dllBytes = File.ReadAllBytes(releaseDllPath);
     CheckDoesNotContain(dllBytes, userProfile, "release DLL omits the local user profile path");
-
+    CheckDoesNotContain(
+        dllBytes,
+        "GlobalInput",
+        "release IL has no global input dependency for color editing");
+    CheckDoesNotContain(
+        dllBytes,
+        "RegisterKey",
+        "release IL has no raw key registration");
+    CheckDoesNotContain(
+        dllBytes,
+        "OnUsePerformed",
+        "release IL has no raw color-use callback");
+    CheckDoesNotContain(
+        dllBytes,
+        "TryResolveTargetFromView",
+        "release IL has no camera target resolver");
+    CheckDoesNotContain(
+        dllBytes,
+        "MainCamTr",
+        "release IL has no nearest-camera target dependency");
+    CheckDoesNotContain(
+        dllBytes,
+        "Raycast",
+        "release IL has no raycast-based color target selection");
     using var stream = File.OpenRead(releaseDllPath);
     using var peReader = new PEReader(stream);
     foreach (DebugDirectoryEntry entry in peReader.ReadDebugDirectory())

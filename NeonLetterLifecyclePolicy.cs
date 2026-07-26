@@ -144,6 +144,7 @@ internal static class NeonLetterDismantleCleanupCoordinator
     public static void Cleanup(
         NeonLetterDismantleCleanupState state,
         bool originalSucceeded,
+        Action<int> removeInteraction,
         Action<int> removeSessionColor,
         Action<int> removePersistentColor,
         Action<ulong> removeMultiplayerColor,
@@ -152,6 +153,7 @@ internal static class NeonLetterDismantleCleanupCoordinator
         Action<Exception>? onCleanupError = null)
     {
         ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(removeInteraction);
         ArgumentNullException.ThrowIfNull(removeSessionColor);
         ArgumentNullException.ThrowIfNull(removePersistentColor);
         ArgumentNullException.ThrowIfNull(removeMultiplayerColor);
@@ -164,6 +166,9 @@ internal static class NeonLetterDismantleCleanupCoordinator
         }
 
         NeonLetterDismantleIdentity identity = state.Identity;
+        RunCleanup(
+            () => removeInteraction(identity.StructureInstanceId),
+            onCleanupError);
         RunCleanup(
             () => removeSessionColor(identity.StructureInstanceId),
             onCleanupError);

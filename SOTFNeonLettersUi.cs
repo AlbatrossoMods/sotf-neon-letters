@@ -1,5 +1,6 @@
 using RedLoader;
 using SUI;
+using SonsSdk.Networking;
 using UnityEngine;
 using static SUI.SUI;
 
@@ -19,9 +20,13 @@ public static class SOTFNeonLettersUi
     private static bool _created;
     private static bool _updatingWheel;
 
+    internal static bool IsOpen => EditorSession.Target != null;
+
     public static void Create()
     {
-        if (_created)
+        if (_created ||
+            NetUtils.IsDedicatedServer ||
+            Application.isBatchMode)
         {
             return;
         }
@@ -139,6 +144,11 @@ public static class SOTFNeonLettersUi
     }
 
     internal static void OnDismantled(int structureInstanceId)
+    {
+        OnStructureUnavailable(structureInstanceId);
+    }
+
+    internal static void OnStructureUnavailable(int structureInstanceId)
     {
         NeonLetterColorTarget target = EditorSession.Target;
         if (target == null ||

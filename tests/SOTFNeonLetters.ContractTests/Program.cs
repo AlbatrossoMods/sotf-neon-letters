@@ -3807,7 +3807,14 @@ void CheckColorRuntimeSafetyContract()
 {
     string runtimePath = FindRepositoryFile("NeonLetterColorRuntime.cs")
         ?? throw new InvalidOperationException("Could not find the color runtime adapter.");
-    string source = File.ReadAllText(runtimePath);
+    string interactionRuntimePath =
+        FindRepositoryFile("NeonLetterColorInteractionRuntime.cs")
+        ?? throw new InvalidOperationException(
+            "Could not find the native color interaction adapter.");
+    string source =
+        File.ReadAllText(runtimePath) +
+        Environment.NewLine +
+        File.ReadAllText(interactionRuntimePath);
 
     CheckEqual(
         false,
@@ -3824,15 +3831,29 @@ void CheckColorRuntimeSafetyContract()
     CheckEqual(
         true,
         source.Contains("GameState.IsPlayerControllable", StringComparison.Ordinal),
-        "the global Use handler is gated while the blueprint book or console owns input");
-    CheckEqual(
-        false,
-        source.Contains("GlobalInput.OnUsePerformed.Subscribe", StringComparison.Ordinal),
-        "color editing does not depend on the unreliable mapped Use action");
+        "the native Use callback is gated while the blueprint book or console owns input");
+    string colorUiPath = FindRepositoryFile("SOTFNeonLettersUi.cs")
+        ?? throw new InvalidOperationException(
+            "Could not find the color editor UI.");
+    string colorUiSource = File.ReadAllText(colorUiPath);
     CheckEqual(
         true,
+        colorUiSource.Contains(
+            "internal static bool IsOpen",
+            StringComparison.Ordinal),
+        "native callbacks can reject focus while the color editor owns input");
+    CheckEqual(
+        false,
+        source.Contains("GlobalInput", StringComparison.Ordinal),
+        "color editing never registers a global input callback");
+    CheckEqual(
+        false,
         source.Contains("GlobalInput.RegisterKey(KeyCode.E", StringComparison.Ordinal),
-        "color editing registers the requested E key through the SonsSdk key API");
+        "color editing never registers a raw E key");
+    CheckEqual(
+        false,
+        source.Contains("KeyCode.E", StringComparison.Ordinal),
+        "color editing has no hard-coded E-key fallback");
     CheckEqual(
         false,
         source.Contains("AttachToBuiltPrefab", StringComparison.Ordinal),
@@ -3842,29 +3863,194 @@ void CheckColorRuntimeSafetyContract()
         source.Contains("RegisterOnStructureComplete", StringComparison.Ordinal),
         "color editing never hooks the native structure-completion callback");
     CheckEqual(
-        false,
-        source.Contains("SonsInteractionTools.CreateInteraction", StringComparison.Ordinal),
-        "color editing never injects interaction objects into registered or built structures");
+        true,
+        source.Contains(
+            "SonsInteractionTools.CreateInteraction<GenericInteraction>",
+            StringComparison.Ordinal),
+        "each registered completed glyph receives a native GenericInteraction proxy");
+    int holderDisabled = source.IndexOf(
+        "interactionHolder.SetActive(false)",
+        StringComparison.Ordinal);
+    int interactionCreated = source.IndexOf(
+        "SonsInteractionTools.CreateInteraction<GenericInteraction>",
+        StringComparison.Ordinal);
+    int actionConfigured = source.IndexOf(
+        "_actionId = NativeUseAction",
+        StringComparison.Ordinal);
+    int geometryConfigured = source.IndexOf(
+        "proxyCollider.radius = geometry.Radius",
+        StringComparison.Ordinal);
+    int promptConfigured = source.IndexOf(
+        "_interactGui = ownedPrompt",
+        StringComparison.Ordinal);
+    int callbackRegistered = source.IndexOf(
+        "RegisterActionPerformed",
+        StringComparison.Ordinal);
+    int holderActivated = source.IndexOf(
+        "interactionHolder.SetActive(true)",
+        StringComparison.Ordinal);
+    CheckEqual(
+        true,
+        holderDisabled >= 0 &&
+        holderDisabled < interactionCreated &&
+        interactionCreated < actionConfigured &&
+        interactionCreated < geometryConfigured &&
+        actionConfigured < promptConfigured &&
+        geometryConfigured < holderActivated &&
+        promptConfigured < callbackRegistered &&
+        callbackRegistered < holderActivated,
+        "the owned inactive holder keeps GenericInteraction disabled until its action, prompt, callback, and geometry are configured");
+    CheckEqual(
+        true,
+        source.Contains(
+            "interactionProxy.GetComponent<SphereCollider>()",
+            StringComparison.Ordinal) &&
+        !source.Contains(
+            "rootCollider.center =",
+            StringComparison.Ordinal) &&
+        !source.Contains(
+            "rootCollider.size =",
+            StringComparison.Ordinal),
+        "the PickUp child proxy owns interaction geometry without mutating the completed structure collider");
     CheckEqual(
         false,
         source.Contains("ClassInjector", StringComparison.Ordinal),
         "color editing does not inject a custom MonoBehaviour into IL2CPP");
     CheckEqual(
-        true,
+        false,
         source.Contains("Physics.Raycast", StringComparison.Ordinal),
-        "the Use action selects a completed letter through the player's view ray");
+        "color editing never selects a glyph through a global view ray");
     CheckEqual(
-        true,
+        false,
         source.Contains("TryResolveTargetFromView", StringComparison.Ordinal),
-        "the raycast result is validated as a known completed neon recipe before editing");
+        "color editing has no camera target resolver");
     CheckEqual(
-        true,
-        source.Contains("GetComponentInParent<ScrewStructure>()", StringComparison.Ordinal),
-        "the raycast resolves the completed ScrewStructure from the letter collider");
+        false,
+        source.Contains("LocalPlayer.MainCamTr", StringComparison.Ordinal),
+        "color editing never resolves the nearest camera target");
     CheckEqual(
         true,
         source.Contains("SOTFNeonLettersUi.Open(target)", StringComparison.Ordinal),
-        "a valid E-key target opens the color editor");
+        "a valid native Use callback opens the same color editor");
+    CheckEqual(
+        true,
+        source.Contains("RegisterActionPerformed", StringComparison.Ordinal) &&
+        source.Contains("UnregisterActionPerformed", StringComparison.Ordinal),
+        "each interaction lease owns one exact native callback subscription");
+    CheckEqual(
+        true,
+        source.Contains("_actionId = NativeUseAction", StringComparison.Ordinal) &&
+        source.Contains("_usePlayerNetworkInteraction = false", StringComparison.Ordinal),
+        "the native interaction uses the remappable local Use action");
+    CheckEqual(
+        true,
+        source.Contains("DynamicInputIcon", StringComparison.Ordinal) &&
+        source.Contains("SetActionId(NativeUseAction)", StringComparison.Ordinal),
+        "the cloned vanilla prompt follows the active keyboard or controller binding");
+    CheckEqual(
+        false,
+        source.Contains(
+            "Object.Destroy(promptTemplate)",
+            StringComparison.Ordinal) ||
+        source.Contains(
+            "Object.Destroy(_promptTemplate)",
+            StringComparison.Ordinal),
+        "interaction cleanup never destroys the borrowed vanilla prompt template");
+    CheckEqual(
+        true,
+        source.Contains(
+            "NeonLetterColorInteractionPromptDiscoverySchedule",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "NeonLetterColorInteractionBackfillCursor",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "MaxPromptCandidatesPerDiscovery",
+            StringComparison.Ordinal) &&
+        CountOccurrences(
+            source,
+            "Resources.FindObjectsOfTypeAll<GenericInteraction>()") == 1,
+        "vanilla prompt discovery is cached and retried through one named bounded scan path");
+    CheckEqual(
+        true,
+        source.Contains(
+            "if (IsDedicatedOrHeadless())",
+            StringComparison.Ordinal),
+        "dedicated and headless updates stop before prompt discovery or backfill");
+    CheckEqual(
+        true,
+        source.Contains("NetUtils.IsDedicatedServer", StringComparison.Ordinal) &&
+        source.Contains("Application.isBatchMode", StringComparison.Ordinal) &&
+        colorUiSource.Contains(
+            "NetUtils.IsDedicatedServer",
+            StringComparison.Ordinal) &&
+        colorUiSource.Contains(
+            "Application.isBatchMode",
+            StringComparison.Ordinal),
+        "dedicated and headless processes skip color interaction UI creation");
+    CheckEqual(
+        true,
+        source.Contains(
+            "nameof(ScrewStructureManager.Register)",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "nameof(ScrewStructureManager.Unregister)",
+            StringComparison.Ordinal),
+        "interaction leases follow the native completed-structure registry");
+    string dismantleRuntimePath =
+        FindRepositoryFile("NeonLetterDismantleRuntime.cs")
+        ?? throw new InvalidOperationException(
+            "Could not find the dismantle runtime adapter.");
+    string dismantleRuntimeSource =
+        File.ReadAllText(dismantleRuntimePath);
+    CheckEqual(
+        true,
+        dismantleRuntimeSource.Contains(
+            "SetColorInteractionDismantling(",
+            StringComparison.Ordinal) &&
+        dismantleRuntimeSource.Contains(
+            "isDismantling: true",
+            StringComparison.Ordinal) &&
+        dismantleRuntimeSource.Contains(
+            "isDismantling: false",
+            StringComparison.Ordinal),
+        "native color interaction is blocked during dismantle and restored only when the original fails");
+    CheckEqual(
+        true,
+        source.Contains(
+            "SOTFNeonLettersUi.OnStructureUnavailable(",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "lease.StructureInstanceId",
+            StringComparison.Ordinal),
+        "unregister, dead sweep, and lifecycle disposal close an editor targeting the removed structure");
+    CheckEqual(
+        false,
+        source.Contains(
+            "HarmonyPatch(typeof(GenericInteraction)",
+            StringComparison.Ordinal),
+        "color editing does not patch native focus arbitration internals");
+    string interactionPolicyPath =
+        FindRepositoryFile("NeonLetterColorInteractionPolicy.cs")
+        ?? throw new InvalidOperationException(
+            "Could not find the native color interaction policy.");
+    string interactionPolicySource =
+        File.ReadAllText(interactionPolicyPath);
+    CheckEqual(
+        true,
+        !interactionPolicySource.Contains(
+            "WeakReference<TStructure>",
+            StringComparison.Ordinal) &&
+        !source.Contains(
+            "WeakReference<ScrewStructure>",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "private readonly ScrewStructure _structure",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "private readonly GameObject _structureRoot",
+            StringComparison.Ordinal),
+        "stable instance IDs drive registry identity while each live lease retains its IL2CPP wrappers");
     CheckEqual(
         true,
         source.Contains(

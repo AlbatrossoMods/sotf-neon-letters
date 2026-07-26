@@ -53,7 +53,7 @@ internal static class NeonLetterDismantleRuntime
             NeonLetterRefundState? refund = TryPrepareRefund(
                 concreteStructure,
                 itemIds);
-            return new NeonLetterDismantleState(
+            var state = new NeonLetterDismantleState(
                 new NeonLetterDismantleCleanupState(
                     new NeonLetterDismantleIdentity(
                         structureInstanceId,
@@ -61,6 +61,10 @@ internal static class NeonLetterDismantleRuntime
                         networkIdentity)),
                 concreteStructure.gameObject,
                 refund);
+            NeonLetterColorRuntime.SetColorInteractionDismantling(
+                structureInstanceId,
+                isDismantling: true);
+            return state;
         }
         catch (Exception exception)
         {
@@ -81,9 +85,17 @@ internal static class NeonLetterDismantleRuntime
 
         try
         {
+            if (!originalSucceeded)
+            {
+                NeonLetterColorRuntime.SetColorInteractionDismantling(
+                    state.CleanupState.Identity.StructureInstanceId,
+                    isDismantling: false);
+            }
+
             NeonLetterDismantleCleanupCoordinator.Cleanup(
                 state.CleanupState,
                 originalSucceeded,
+                NeonLetterColorRuntime.RemoveColorInteraction,
                 NeonLetterColorRuntime.RemoveSessionColor,
                 NeonLetterColorRuntime.RemovePersistentColor,
                 NeonLetterMultiplayerRuntime.RemoveDismantledColor,

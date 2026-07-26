@@ -1,17 +1,14 @@
 using Bolt;
 using RedLoader;
 using Sons.Crafting.Structures;
-using Sons.Gui.Input;
 using SonsSdk;
 using SonsSdk.Networking;
-using TheForest.Utils;
 using UnityEngine;
 
 namespace SOTFNeonLetters;
 
-public static class NeonLetterColorRuntime
+public static partial class NeonLetterColorRuntime
 {
-    private const float TargetDistance = 3f;
     private static readonly NeonLetterSessionColors<int> SessionColors = new();
     private static readonly NeonLetterColorSaveState PersistentColors = new();
     private static readonly NeonLetterColorSaveable Saveable = new();
@@ -46,18 +43,6 @@ public static class NeonLetterColorRuntime
 
         try
         {
-            if (GlobalInput.RegisterKey(KeyCode.E, OnUsePerformed))
-            {
-                Lifecycle.CompleteStage(
-                    () => GlobalInput.UnregisterKey(KeyCode.E));
-            }
-            else
-            {
-                RLog.Error(
-                    "[SOTFNeonLetters] The E key is already registered; " +
-                    "the neon color editor cannot be opened.");
-            }
-
             SdkEvents.OnAfterSpawn.Subscribe(
                 SignalPersistentColorReadiness);
             Lifecycle.CompleteStage(
@@ -99,6 +84,8 @@ public static class NeonLetterColorRuntime
         SessionColors.Clear();
         PersistentColors.Clear();
         EmissionBindings.Clear();
+        ReleaseAllInteractions();
+        ResetInteractionDiscovery();
         RestoreLifecycle.Deinitialize();
         ResetRestoreReadiness();
     }
@@ -163,107 +150,6 @@ public static class NeonLetterColorRuntime
         EmissionBindings.Remove(structureInstanceId, structureRoot);
     }
 
-    private static void OnUsePerformed()
-    {
-        bool isPlayerControllable = GameState.IsPlayerControllable;
-        if (!isPlayerControllable)
-        {
-            return;
-        }
-
-        try
-        {
-            bool hasTarget = TryResolveTargetFromView(out NeonLetterColorTarget target);
-            if (!NeonLetterColorInteractionPolicy.CanOpenEditor(
-                    isPlayerControllable,
-                    hasTarget))
-            {
-                return;
-            }
-
-            SOTFNeonLettersUi.Open(target);
-        }
-        catch (Exception exception)
-        {
-            RLog.Error($"[SOTFNeonLetters] Failed to open color editor: {exception}");
-        }
-    }
-
-    private static bool TryResolveTargetFromView(out NeonLetterColorTarget target)
-    {
-        target = null;
-        Transform cameraTransform = LocalPlayer.MainCamTr;
-        if (cameraTransform == null)
-        {
-            return false;
-        }
-
-        if (!Physics.Raycast(
-                cameraTransform.position,
-                cameraTransform.forward,
-                out RaycastHit hit,
-                TargetDistance,
-                Physics.DefaultRaycastLayers,
-                QueryTriggerInteraction.Ignore))
-        {
-            return false;
-        }
-
-        Collider hitCollider = hit.collider;
-        ScrewStructure structure =
-            hitCollider == null
-                ? null
-                : hitCollider.GetComponentInParent<ScrewStructure>();
-        int recipeId = structure?.Recipe?.Id ?? int.MinValue;
-        if (!NeonLetterColorInteractionPolicy.IsEditable(
-                hasCompletedStructure: structure != null,
-                recipeId))
-        {
-            return false;
-        }
-
-        NeonLetterSmallDefinition definition = NeonLetterSmallCatalog.All.FirstOrDefault(
-            candidate => candidate.RecipeId == recipeId);
-        if (definition == null)
-        {
-            return false;
-        }
-
-        NeonLetterColorTargetMode targetMode = NetUtils.IsMultiplayer
-            ? NeonLetterColorTargetMode.Multiplayer
-            : NeonLetterColorTargetMode.SinglePlayer;
-        BoltEntity networkEntity = null;
-        if (targetMode == NeonLetterColorTargetMode.Multiplayer)
-        {
-            NeonLetterColorCommitRoute route =
-                NeonLetterColorCommitRoutingPolicy.Resolve(
-                    targetMode,
-                    NetUtils.IsServer,
-                    NetUtils.IsClient);
-            if (!BoltNetwork.isRunning ||
-                (route != NeonLetterColorCommitRoute.MultiplayerHost &&
-                 route != NeonLetterColorCommitRoute.MultiplayerClient))
-            {
-                return false;
-            }
-
-            networkEntity = structure.gameObject.GetComponent<BoltEntity>();
-            if (networkEntity == null ||
-                !networkEntity.isAttached ||
-                networkEntity.networkId.IsZero)
-            {
-                return false;
-            }
-        }
-
-        target = new NeonLetterColorTarget(
-            structure,
-            definition,
-            targetMode,
-            networkEntity);
-        return true;
-    }
-
     private static void StagePersistentColorRestore()
     {
         RestoreLifecycle.SetSinglePlayerRole(IsSinglePlayerRole());
@@ -281,6 +167,7 @@ public static class NeonLetterColorRuntime
 
     private static void AdvancePersistentColorRestore()
     {
+        AdvanceColorInteractions();
         bool isSinglePlayer = IsSinglePlayerRole();
         RestoreLifecycle.SetSinglePlayerRole(isSinglePlayer);
         if (RestoreLifecycle.PendingCount == 0)
@@ -322,6 +209,8 @@ public static class NeonLetterColorRuntime
         }
         finally
         {
+            ReleaseAllInteractions();
+            ResetInteractionDiscovery();
             SessionColors.Clear();
             PersistentColors.Clear();
             EmissionBindings.Clear();

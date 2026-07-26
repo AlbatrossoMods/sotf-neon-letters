@@ -172,6 +172,7 @@ public sealed class LifecycleAndDismantleHardeningTests
         NeonLetterDismantleCleanupCoordinator.Cleanup(
             state,
             originalSucceeded: false,
+            instanceId => removedIdentities.Add($"interaction:{instanceId}"),
             instanceId => removedIdentities.Add($"session:{instanceId}"),
             saveId => removedIdentities.Add($"persistent:{saveId}"),
             networkIdentity => removedIdentities.Add($"network:{networkIdentity}"),
@@ -196,6 +197,7 @@ public sealed class LifecycleAndDismantleHardeningTests
             NeonLetterDismantleCleanupCoordinator.Cleanup(
                 state,
                 originalSucceeded: true,
+                instanceId => removedIdentities.Add($"interaction:{instanceId}"),
                 instanceId => removedIdentities.Add($"session:{instanceId}"),
                 saveId => removedIdentities.Add($"persistent:{saveId}"),
                 networkIdentity => removedIdentities.Add($"network:{networkIdentity}"),
@@ -206,6 +208,7 @@ public sealed class LifecycleAndDismantleHardeningTests
         Assert.Equal(
             new[]
             {
+                "interaction:11",
                 "session:11",
                 "persistent:22",
                 "network:33",
@@ -228,6 +231,7 @@ public sealed class LifecycleAndDismantleHardeningTests
         NeonLetterDismantleCleanupCoordinator.Cleanup(
             state,
             originalSucceeded: true,
+            instanceId => cleanupResults.Add($"interaction:{instanceId}"),
             _ => throw new InvalidOperationException("session failure"),
             saveId => cleanupResults.Add($"persistent:{saveId}"),
             networkIdentity => cleanupResults.Add($"network:{networkIdentity}"),
@@ -238,6 +242,7 @@ public sealed class LifecycleAndDismantleHardeningTests
         Assert.Equal(
             new[]
             {
+                "interaction:11",
                 "session failure",
                 "persistent:22",
                 "network:33",
