@@ -105,7 +105,7 @@ namespace SOTFNeonLetters.Editor
 
             RunTest("fresh Windows bundle has exact symbol manifest", TestBundleArtifact, failures);
             RunTest(
-                "Windows bundle resolves all SonsSdk short-name asset references",
+                "Windows bundle resolves all non-readable SonsSdk texture references",
                 TestRuntimeAssetReferences,
                 failures);
 
@@ -423,7 +423,7 @@ namespace SOTFNeonLetters.Editor
         {
             Texture2D icon = LoadRequiredAsset<Texture2D>(letter.BookIconAssetPath);
             AssertTexture(icon, letter.BookIconName, 128, 128, 8, $"{letter.Letter} book icon");
-            Color32[] pixels = icon.GetPixels32();
+            Color32[] pixels = ReadSerializedDxt1Pixels(icon);
             AssertLightCorners(pixels, icon.width, icon.height, $"{letter.Letter} book icon");
 
             PixelBounds cyanBounds = FindCyanBounds(
@@ -451,7 +451,7 @@ namespace SOTFNeonLetters.Editor
             {
                 Texture2D icon = LoadRequiredAsset<Texture2D>(letter.BookIconAssetPath);
                 ulong signature = CalculateCyanSignature(
-                    icon.GetPixels32(),
+                    ReadSerializedDxt1Pixels(icon),
                     icon.width,
                     icon.height,
                     new PixelRegion(0, icon.width, 0, icon.height));
@@ -479,7 +479,7 @@ namespace SOTFNeonLetters.Editor
                 "B prefab forward-facing Y rotation");
 
             Texture2D icon = LoadRequiredAsset<Texture2D>(letterB.BookIconAssetPath);
-            Color32[] pixels = icon.GetPixels32();
+            Color32[] pixels = ReadSerializedDxt1Pixels(icon);
             var silhouette = new bool[pixels.Length];
             for (int index = 0; index < pixels.Length; index++)
             {
@@ -783,7 +783,7 @@ namespace SOTFNeonLetters.Editor
             Texture2D page = LoadRequiredAsset<Texture2D>(pagePath);
             AssertTexture(page, pageName, 1024, 1024, 11, $"{topLetter.Letter}-{bottomLetter.Letter} page");
 
-            Color32[] pixels = page.GetPixels32();
+            Color32[] pixels = ReadSerializedDxt1Pixels(page);
             AssertLightCorners(
                 pixels,
                 page.width,
@@ -871,7 +871,7 @@ namespace SOTFNeonLetters.Editor
             Texture2D expectedIcon =
                 LoadRequiredAsset<Texture2D>(expectedLetter.BookIconAssetPath);
             byte[] expectedSignature = CreateNormalizedCyanSignature(
-                expectedIcon.GetPixels32(),
+                ReadSerializedDxt1Pixels(expectedIcon),
                 expectedIcon.width,
                 expectedIcon.height,
                 new PixelRegion(0, expectedIcon.width, 0, expectedIcon.height));
@@ -1064,12 +1064,29 @@ namespace SOTFNeonLetters.Editor
                 foreach (LetterCase letter in Letters)
                 {
                     RequireBundleAsset<GameObject>(bundle, letter.PrefabName);
-                    RequireBundleAsset<Texture2D>(bundle, letter.BookIconName);
+                    Texture2D icon =
+                        RequireBundleAsset<Texture2D>(bundle, letter.BookIconName);
+                    AssertTexture(
+                        icon,
+                        letter.BookIconName,
+                        128,
+                        128,
+                        8,
+                        $"{letter.Letter} bundled book icon");
                 }
 
                 for (int pageIndex = 0; pageIndex < BookPageCount; pageIndex++)
                 {
-                    RequireBundleAsset<Texture2D>(bundle, GetBookPageName(pageIndex));
+                    string pageName = GetBookPageName(pageIndex);
+                    Texture2D page =
+                        RequireBundleAsset<Texture2D>(bundle, pageName);
+                    AssertTexture(
+                        page,
+                        pageName,
+                        1024,
+                        1024,
+                        11,
+                        $"{pageName} bundled book page");
                 }
             }
             finally
@@ -1078,7 +1095,7 @@ namespace SOTFNeonLetters.Editor
             }
         }
 
-        private static void RequireBundleAsset<T>(AssetBundle bundle, string assetName)
+        private static T RequireBundleAsset<T>(AssetBundle bundle, string assetName)
             where T : UnityEngine.Object
         {
             T asset = bundle.LoadAsset<T>(assetName);
@@ -1087,6 +1104,8 @@ namespace SOTFNeonLetters.Editor
                 throw new InvalidOperationException(
                     $"Windows bundle does not resolve '{assetName}' as {typeof(T).Name}");
             }
+
+            return asset;
         }
 
         private static void AssertBundleWasBuiltForThisRun(FileInfo bundle)
@@ -1232,6 +1251,123 @@ namespace SOTFNeonLetters.Editor
             AssertEqual(expectedHeight, texture.height, $"{description} height");
             AssertEqual(TextureFormat.DXT1, texture.format, $"{description} format");
             AssertEqual(expectedMipCount, texture.mipmapCount, $"{description} mip count");
+            AssertEqual(false, texture.isReadable, $"{description} CPU readability");
+            AssertEqual(FilterMode.Bilinear, texture.filterMode, $"{description} filter mode");
+            AssertEqual(TextureWrapMode.Clamp, texture.wrapMode, $"{description} wrap mode");
+            AssertEqual(1, texture.anisoLevel, $"{description} anisotropic level");
+
+            string assetPath = AssetDatabase.GetAssetPath(texture);
+            if (!string.IsNullOrEmpty(assetPath))
+            {
+                AssertSerializedTextureField(
+                    assetPath,
+                    "m_IsReadable",
+                    "0",
+                    $"{description} serialized CPU readability");
+                AssertSerializedTextureField(
+                    assetPath,
+                    "m_StreamingMipmaps",
+                    "0",
+                    $"{description} streaming mipmaps");
+                AssertSerializedTextureField(
+                    assetPath,
+                    "m_ColorSpace",
+                    "0",
+                    $"{description} color space");
+            }
+        }
+
+        private static Color32[] ReadSerializedDxt1Pixels(Texture2D texture)
+        {
+            string assetPath = AssetDatabase.GetAssetPath(texture);
+            if (string.IsNullOrEmpty(assetPath))
+            {
+                throw new InvalidOperationException(
+                    $"Texture '{texture.name}' has no serialized asset path.");
+            }
+
+            string payloadHex = ReadSerializedTextureField(
+                assetPath,
+                "_typelessdata");
+            if (payloadHex.Length % 2 != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Texture '{texture.name}' has an odd-length serialized payload.");
+            }
+
+            var payload = new byte[payloadHex.Length / 2];
+            for (int index = 0; index < payload.Length; index++)
+            {
+                payload[index] = (byte)(
+                    ReadHexNibble(payloadHex[index * 2]) << 4 |
+                    ReadHexNibble(payloadHex[index * 2 + 1]));
+            }
+
+            var readableTexture = new Texture2D(
+                texture.width,
+                texture.height,
+                TextureFormat.DXT1,
+                texture.mipmapCount > 1,
+                false);
+            try
+            {
+                readableTexture.LoadRawTextureData(payload);
+                readableTexture.Apply(false, false);
+                return readableTexture.GetPixels32();
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(readableTexture);
+            }
+        }
+
+        private static int ReadHexNibble(char value)
+        {
+            if (value >= '0' && value <= '9')
+            {
+                return value - '0';
+            }
+
+            if (value >= 'a' && value <= 'f')
+            {
+                return value - 'a' + 10;
+            }
+
+            throw new InvalidOperationException(
+                $"Serialized texture payload contains invalid hex character '{value}'.");
+        }
+
+        private static void AssertSerializedTextureField(
+            string assetPath,
+            string fieldName,
+            string expectedValue,
+            string description)
+        {
+            AssertEqual(
+                expectedValue,
+                ReadSerializedTextureField(assetPath, fieldName),
+                description);
+        }
+
+        private static string ReadSerializedTextureField(
+            string assetPath,
+            string fieldName)
+        {
+            string projectRoot = Directory.GetParent(Application.dataPath)?.FullName
+                ?? throw new InvalidOperationException("could not resolve Unity project root");
+            string absolutePath = Path.Combine(
+                projectRoot,
+                assetPath.Replace('/', Path.DirectorySeparatorChar));
+            string prefix = $"  {fieldName}: ";
+            string line = File.ReadLines(absolutePath)
+                .SingleOrDefault(candidate => candidate.StartsWith(prefix, StringComparison.Ordinal));
+            if (line == null)
+            {
+                throw new InvalidOperationException(
+                    $"Texture asset '{assetPath}' has no serialized field '{fieldName}'.");
+            }
+
+            return line.Substring(prefix.Length);
         }
 
         private static void AssertLightCorners(

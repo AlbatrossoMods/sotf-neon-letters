@@ -475,6 +475,13 @@ namespace SOTFNeonLetters.Editor
                     $"{expectedMipCount} mip levels, but has {texture.mipmapCount}.");
             }
 
+            texture.Apply(false, true);
+            if (texture.isReadable)
+            {
+                throw new InvalidOperationException(
+                    $"Generated {assetDescription} must release its CPU pixel copy.");
+            }
+
             SaveGeneratedAsset(texture, assetPath);
         }
 
