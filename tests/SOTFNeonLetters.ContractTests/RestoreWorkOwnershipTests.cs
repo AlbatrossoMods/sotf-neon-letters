@@ -703,7 +703,7 @@ public sealed class RestoreWorkOwnershipTests
         var ownership = new NeonLetterRestoreWorkOwnership();
         using var sealedBarrier = new Barrier(2);
         using var releaseRegistration = new ManualResetEventSlim();
-        Task<(ulong SealedGeneration, ulong FinalGeneration)> deinitialize =
+        Task<(ulong SealedGeneration, bool FinalSuspended)> deinitialize =
             Task.Run(
                 () =>
                 {
@@ -729,7 +729,9 @@ public sealed class RestoreWorkOwnershipTests
                     Assert.False(completion.ResumeLoads);
                     return (
                         sealedGeneration,
-                        queue.SuspendAndClear());
+                        queue.TrySuspendAndClear(
+                            completion.QueueSuspensionGeneration,
+                            out _));
                 });
         Assert.True(sealedBarrier.SignalAndWait(TestTimeout));
 
@@ -762,32 +764,30 @@ public sealed class RestoreWorkOwnershipTests
             releaseRegistration.Set();
         }
 
-        (ulong sealedGeneration, ulong finalGeneration) =
+        (ulong sealedGeneration, bool finalSuspended) =
             await deinitialize.WaitAsync(TestTimeout);
         bool staleResume = queue.Resume(
             weakCompletion.QueueSuspensionGeneration);
-        bool freshResume = queue.Resume(finalGeneration);
         bool loadAccepted = queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
 
         Assert.Equal(
-            (false, false, false, false, true, true),
+            (false, false, false, false, true),
             (
                 weakResume,
+                finalSuspended,
                 staleResume,
-                freshResume,
                 loadAccepted,
-                weakGeneration > sealedGeneration,
-                finalGeneration > weakGeneration));
+                weakGeneration > sealedGeneration));
     }
 
     [Fact]
-    public async Task RoleLossReassertsSuspensionAfterWeakResetCompletionAsync()
+    public async Task StaleRoleLossCannotSuspendNewerWeakResetCompletionAsync()
     {
         var queue = new NeonLetterMultiplayerRestoreLoadQueue();
         var ownership = new NeonLetterRestoreWorkOwnership();
         using var suspensionBarrier = new Barrier(2);
         using var releaseRegistration = new ManualResetEventSlim();
-        Task<ulong> roleLoss = Task.Run(
+        Task<bool> roleLoss = Task.Run(
             () =>
             {
                 ulong generation = queue.SuspendAndClear();
@@ -810,7 +810,9 @@ public sealed class RestoreWorkOwnershipTests
                         out _,
                         out NeonLetterRestoreResetCompletion completion));
                 Assert.False(completion.ResumeLoads);
-                return queue.SuspendAndClear();
+                return queue.TrySuspendAndClear(
+                    completion.QueueSuspensionGeneration,
+                    out _);
             });
         Assert.True(suspensionBarrier.SignalAndWait(TestTimeout));
 
@@ -842,22 +844,115 @@ public sealed class RestoreWorkOwnershipTests
             releaseRegistration.Set();
         }
 
-        ulong currentGeneration =
+        bool roleLossSuspended =
             await roleLoss.WaitAsync(TestTimeout);
-        bool loadWhileSuspended =
+        bool loadAccepted =
             queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
         bool staleResume = queue.Resume(
             weakCompletion.QueueSuspensionGeneration);
-        bool hostResume = queue.Resume(currentGeneration);
+
+        Assert.Equal(
+            (false, true, false),
+            (
+                roleLossSuspended,
+                loadAccepted,
+                staleResume));
+    }
+
+    [Fact]
+    public async Task OldDeinitializeCompletionCannotSuspendFreshInitializationAsync()
+    {
+        var queue = new NeonLetterMultiplayerRestoreLoadQueue();
+        var ownership = new NeonLetterRestoreWorkOwnership();
+        ulong sealedGeneration = queue.SealAndClear();
+        Assert.True(
+            ownership.RequestReset(
+                rollbackOwnedFallbacks: true,
+                resumeLoads: false,
+                sealedGeneration,
+                out var reset));
+        NeonLetterRestoreResetRequest request =
+            ownership.GetResetRequest(reset);
+        Assert.True(
+            ownership.TryCompleteReset(
+                reset,
+                request.Version,
+                rollbackSatisfied: true,
+                out _,
+                out NeonLetterRestoreResetCompletion completion));
+        using var suspendBarrier = new Barrier(2);
+        using var releaseSuspension = new ManualResetEventSlim();
+        Task<bool> oldSuspension = Task.Run(
+            () =>
+            {
+                Assert.True(
+                    suspendBarrier.SignalAndWait(TestTimeout));
+                Assert.True(releaseSuspension.Wait(TestTimeout));
+                return queue.TrySuspendAndClear(
+                    completion.QueueSuspensionGeneration,
+                    out _);
+            });
+        Assert.True(suspendBarrier.SignalAndWait(TestTimeout));
+
+        bool initializationResume;
+        try
+        {
+            ulong initializationGeneration =
+                queue.ResetForInitialization();
+            initializationResume =
+                queue.Resume(initializationGeneration);
+        }
+        finally
+        {
+            releaseSuspension.Set();
+        }
+
+        bool suspended = await oldSuspension.WaitAsync(TestTimeout);
+        bool loadAccepted = queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
+
+        Assert.Equal(
+            (true, false, true),
+            (initializationResume, suspended, loadAccepted));
+    }
+
+    [Fact]
+    public void SameGenerationRoleLossSuspendsUntilHostResume()
+    {
+        var queue = new NeonLetterMultiplayerRestoreLoadQueue();
+        var ownership = new NeonLetterRestoreWorkOwnership();
+        ulong roleLossGeneration = queue.SuspendAndClear();
+        Assert.True(
+            ownership.RequestReset(
+                rollbackOwnedFallbacks: true,
+                resumeLoads: false,
+                roleLossGeneration,
+                out var reset));
+        NeonLetterRestoreResetRequest request =
+            ownership.GetResetRequest(reset);
+        Assert.True(
+            ownership.TryCompleteReset(
+                reset,
+                request.Version,
+                rollbackSatisfied: true,
+                out _,
+                out NeonLetterRestoreResetCompletion completion));
+
+        bool suspended = queue.TrySuspendAndClear(
+            completion.QueueSuspensionGeneration,
+            out ulong hostGeneration);
+        bool suspendedLoad =
+            queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
+        bool hostResume = queue.Resume(hostGeneration);
         bool hostLoad = queue.Enqueue(CreateEnvelope(nativeSaveId: 2));
 
         Assert.Equal(
-            (false, false, true, true),
+            (true, false, true, true, true),
             (
-                loadWhileSuspended,
-                staleResume,
+                suspended,
+                suspendedLoad,
                 hostResume,
-                hostLoad));
+                hostLoad,
+                hostGeneration > roleLossGeneration));
     }
 
     private static NeonLetterMultiplayerSaveEnvelope CreateEnvelope(

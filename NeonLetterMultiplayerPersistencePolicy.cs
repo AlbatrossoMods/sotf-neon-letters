@@ -383,6 +383,29 @@ internal sealed class NeonLetterMultiplayerRestoreLoadQueue
         }
     }
 
+    internal bool TrySuspendAndClear(
+        ulong expectedGeneration,
+        out ulong newGeneration)
+    {
+        lock (_sync)
+        {
+            if (expectedGeneration == 0 ||
+                expectedGeneration != _suspensionGenerations.Current)
+            {
+                newGeneration = 0;
+                return false;
+            }
+
+            _accepting = false;
+            _resumeAllowed = false;
+            _generation = new object();
+            _pending = null;
+            newGeneration = _suspensionGenerations.Advance();
+            _resumeAllowed = !_sealed;
+            return true;
+        }
+    }
+
     internal ulong SealAndClear()
     {
         lock (_sync)

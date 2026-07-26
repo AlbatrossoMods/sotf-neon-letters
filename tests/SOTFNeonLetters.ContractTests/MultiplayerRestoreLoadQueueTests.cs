@@ -495,6 +495,35 @@ public sealed class MultiplayerRestoreLoadQueueTests
                 initializationGeneration > sealedGeneration));
     }
 
+    [Fact]
+    public void ConditionalSuspensionRejectsStaleReinitializationGenerations()
+    {
+        var queue = new NeonLetterMultiplayerRestoreLoadQueue();
+        ulong staleGeneration = queue.SuspendAndClear();
+        ulong firstInitialization = queue.ResetForInitialization();
+        Assert.True(queue.Resume(firstInitialization));
+        ulong latestInitialization = queue.ResetForInitialization();
+        Assert.True(queue.Resume(latestInitialization));
+
+        bool staleSuspended = queue.TrySuspendAndClear(
+            staleGeneration,
+            out ulong staleResult);
+        bool initializationSuspended = queue.TrySuspendAndClear(
+            firstInitialization,
+            out ulong initializationResult);
+        bool loadAccepted = queue.Enqueue(CreateEnvelope(nativeSaveId: 1));
+
+        Assert.Equal(
+            (false, 0UL, false, 0UL, true, true),
+            (
+                staleSuspended,
+                staleResult,
+                initializationSuspended,
+                initializationResult,
+                loadAccepted,
+                latestInitialization > firstInitialization));
+    }
+
     private static NeonLetterMultiplayerRestoreCoordinator<RestoreTarget>
         CreateCoordinator(NeonLetterMultiplayerSaveEnvelope envelope)
     {

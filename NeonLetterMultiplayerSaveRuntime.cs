@@ -404,7 +404,9 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             }
             else
             {
-                _queuedLoads.SuspendAndClear();
+                _queuedLoads.TrySuspendAndClear(
+                    completion.QueueSuspensionGeneration,
+                    out _);
             }
         }
     }
