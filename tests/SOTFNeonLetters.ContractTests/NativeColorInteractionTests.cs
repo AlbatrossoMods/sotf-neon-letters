@@ -367,22 +367,6 @@ public sealed class NativeColorInteractionTests
     }
 
     [Fact]
-    public void PromptDiscoveryRetriesOnlyAfterTheNamedUpdateBackoff()
-    {
-        var schedule = new NeonLetterColorInteractionPromptDiscoverySchedule();
-
-        bool first = schedule.TryBeginAttempt(updateTick: 0);
-        bool tooEarly = schedule.TryBeginAttempt(
-            NeonLetterColorInteractionPromptDiscoverySchedule
-                .RetryUpdateDelay - 1);
-        bool retry = schedule.TryBeginAttempt(
-            NeonLetterColorInteractionPromptDiscoverySchedule
-                .RetryUpdateDelay);
-
-        Assert.Equal((true, false, true), (first, tooEarly, retry));
-    }
-
-    [Fact]
     public void SuccessfulPromptDiscoveryStartsANewFailureReportingEpisode()
     {
         var gate = new NeonLetterColorInteractionFailureGate();
@@ -394,42 +378,193 @@ public sealed class NativeColorInteractionTests
     }
 
     [Fact]
-    public void BoundedPromptCandidateWindowsAdvanceWithoutPermanentExclusion()
+    public void ObservedNativeUsePromptStartsPendingBackfill()
     {
-        NeonLetterColorInteractionPromptCandidateWindow first =
-            NeonLetterColorInteractionPromptCandidateWindowPolicy.Resolve(
-                candidateCount: 300,
-                startOffset: 0,
-                maximumCandidates: 256);
-        NeonLetterColorInteractionPromptCandidateWindow second =
-            NeonLetterColorInteractionPromptCandidateWindowPolicy.Resolve(
-                candidateCount: 300,
-                startOffset: first.NextOffset,
-                maximumCandidates: 256);
+        var prompt = new TrackedPrompt();
+        var lifecycle =
+            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
+                candidate => candidate.IsAlive);
+
+        NeonLetterColorInteractionPromptObservationResult result =
+            lifecycle.Observe(
+                new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
+                    IsOwnedColorInteraction: false,
+                    UsesNativeUseAction: true,
+                    HasInteractionGui: true,
+                    HasDynamicInputIcon: true,
+                    prompt));
 
         Assert.Equal(
             (
-                first.StartOffset,
-                first.Count,
-                first.NextOffset,
-                second.StartOffset,
-                second.Count,
-                second.NextOffset),
-            (0, 256, 256, 256, 44, 0));
+                NeonLetterColorInteractionPromptObservationResult.Accepted,
+                true,
+                1UL),
+            (result, lifecycle.IsBackfillPending, lifecycle.Generation));
+    }
+
+    [Fact]
+    public void OwnedColorInteractionCannotBecomePromptTemplate()
+    {
+        var lifecycle =
+            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
+                candidate => candidate.IsAlive);
+
+        NeonLetterColorInteractionPromptObservationResult result =
+            lifecycle.Observe(
+                new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
+                    IsOwnedColorInteraction: true,
+                    UsesNativeUseAction: true,
+                    HasInteractionGui: true,
+                    HasDynamicInputIcon: true,
+                    new TrackedPrompt()));
+
+        Assert.Equal(
+            NeonLetterColorInteractionPromptObservationResult.Ignored,
+            result);
+    }
+
+    [Theory]
+    [InlineData(false, true, true)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    public void InvalidNativePromptCandidateIsIgnored(
+        bool usesNativeUseAction,
+        bool hasInteractionGui,
+        bool hasDynamicInputIcon)
+    {
+        var lifecycle =
+            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
+                candidate => candidate.IsAlive);
+
+        NeonLetterColorInteractionPromptObservationResult result =
+            lifecycle.Observe(
+                new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
+                    IsOwnedColorInteraction: false,
+                    usesNativeUseAction,
+                    hasInteractionGui,
+                    hasDynamicInputIcon,
+                    new TrackedPrompt()));
+
+        Assert.Equal(
+            NeonLetterColorInteractionPromptObservationResult.Ignored,
+            result);
+    }
+
+    [Fact]
+    public void DestroyedPromptCanBeReplacedByTheNextObservedCandidate()
+    {
+        var first = new TrackedPrompt();
+        var replacement = new TrackedPrompt();
+        var lifecycle =
+            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
+                candidate => candidate.IsAlive);
+        lifecycle.Observe(
+            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
+                false,
+                true,
+                true,
+                true,
+                first));
+        first.IsAlive = false;
+
+        NeonLetterColorInteractionPromptObservationResult result =
+            lifecycle.Observe(
+                new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
+                    false,
+                    true,
+                    true,
+                    true,
+                    replacement));
+        bool found = lifecycle.TryGetTemplate(
+            out TrackedPrompt? resolved);
+
+        Assert.Equal(
+            (
+                NeonLetterColorInteractionPromptObservationResult.Accepted,
+                true,
+                replacement,
+                2UL),
+            (result, found, resolved, lifecycle.Generation));
+    }
+
+    [Fact]
+    public void RepeatedOnEnableForCurrentPromptIsIdempotent()
+    {
+        var prompt = new TrackedPrompt();
+        var lifecycle =
+            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
+                candidate => candidate.IsAlive);
+        var candidate =
+            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
+                false,
+                true,
+                true,
+                true,
+                prompt);
+        lifecycle.Observe(candidate);
+
+        NeonLetterColorInteractionPromptObservationResult result =
+            lifecycle.Observe(candidate);
+
+        Assert.Equal(
+            (
+                NeonLetterColorInteractionPromptObservationResult.Unchanged,
+                1UL,
+                1),
+            (result, lifecycle.Generation, lifecycle.RetainedTemplateCount));
+    }
+
+    [Fact]
+    public void PromptObservationRetainsOnlyTheCurrentTemplate()
+    {
+        var lifecycle =
+            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
+                candidate => candidate.IsAlive);
+        lifecycle.Observe(
+            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
+                false,
+                true,
+                true,
+                true,
+                new TrackedPrompt()));
+
+        lifecycle.Observe(
+            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
+                false,
+                true,
+                true,
+                true,
+                new TrackedPrompt()));
+
+        Assert.Equal(1, lifecycle.RetainedTemplateCount);
     }
 
     [Fact]
     public void PromptBackfillCycleAdvancesInBoundedWindows()
     {
-        var cursor = new NeonLetterColorInteractionBackfillCursor();
-        cursor.StartCycle();
+        var lifecycle =
+            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
+                candidate => candidate.IsAlive);
+        lifecycle.Observe(
+            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
+                false,
+                true,
+                true,
+                true,
+                new TrackedPrompt()));
 
         NeonLetterColorInteractionBackfillWindow first =
-            cursor.TakeWindow(itemCount: 130, maximumItems: 64);
+            lifecycle.TakeBackfillWindow(
+                itemCount: 130,
+                maximumItems: 64);
         NeonLetterColorInteractionBackfillWindow second =
-            cursor.TakeWindow(itemCount: 130, maximumItems: 64);
+            lifecycle.TakeBackfillWindow(
+                itemCount: 130,
+                maximumItems: 64);
         NeonLetterColorInteractionBackfillWindow third =
-            cursor.TakeWindow(itemCount: 130, maximumItems: 64);
+            lifecycle.TakeBackfillWindow(
+                itemCount: 130,
+                maximumItems: 64);
 
         Assert.Equal(
             (0, 64, 64, 64, 128, 2, false),
@@ -440,19 +575,32 @@ public sealed class NativeColorInteractionTests
                 second.Count,
                 third.StartOffset,
                 third.Count,
-                cursor.IsActive));
+                lifecycle.IsBackfillPending));
     }
 
     [Fact]
     public void UnavailableManagerKeepsPromptBackfillCycleRetryable()
     {
-        var cursor = new NeonLetterColorInteractionBackfillCursor();
-        cursor.StartCycle();
+        var lifecycle =
+            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
+                candidate => candidate.IsAlive);
+        lifecycle.Observe(
+            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
+                false,
+                true,
+                true,
+                true,
+                new TrackedPrompt()));
 
-        cursor.ReportUnavailable();
+        lifecycle.ReportBackfillUnavailable();
 
-        Assert.True(cursor.IsActive);
+        Assert.True(lifecycle.IsBackfillPending);
     }
 
     private sealed record TrackedRoot(bool IsAlive);
+
+    private sealed class TrackedPrompt
+    {
+        internal bool IsAlive { get; set; } = true;
+    }
 }

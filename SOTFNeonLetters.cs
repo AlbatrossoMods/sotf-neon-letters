@@ -24,6 +24,8 @@ public class SOTFNeonLetters : SonsMod
         RLog.Msg("[SOTFNeonLetters] Mod initialization started.");
         try
         {
+            NeonLetterColorRuntime.BeginInteractionPromptObservation();
+            _lifecycle.CompleteStage(NeonLetterColorRuntime.EndInteractionPromptObservation);
             NeonLetterMultiplayerRuntime.Initialize();
             _lifecycle.CompleteStage(NeonLetterMultiplayerRuntime.Deinitialize);
             Config.Init();

@@ -103,6 +103,10 @@ void CheckReleaseAssemblyPaths()
         dllBytes,
         "Raycast",
         "release IL has no raycast-based color target selection");
+    CheckDoesNotContain(
+        dllBytes,
+        "FindObjectsOfTypeAll",
+        "release IL has no global GenericInteraction materialization");
     using var stream = File.OpenRead(releaseDllPath);
     using var peReader = new PEReader(stream);
     foreach (DebugDirectoryEntry entry in peReader.ReadDebugDirectory())

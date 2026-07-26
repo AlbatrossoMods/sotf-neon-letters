@@ -297,7 +297,119 @@ internal sealed class NeonLetterColorInteractionFailureGate
     }
 }
 
-internal sealed class NeonLetterColorInteractionPromptDiscoverySchedule
+internal readonly record struct
+    NeonLetterColorInteractionPromptCandidate<TTemplate>(
+        bool IsOwnedColorInteraction,
+        bool UsesNativeUseAction,
+        bool HasInteractionGui,
+        bool HasDynamicInputIcon,
+        TTemplate Template)
+    where TTemplate : class;
+
+internal enum NeonLetterColorInteractionPromptObservationResult
+{
+    Ignored,
+    Unchanged,
+    Accepted
+}
+
+internal sealed class
+    NeonLetterColorInteractionPromptLifecycle<TTemplate>
+    where TTemplate : class
+{
+    private readonly Func<TTemplate, bool> _isAlive;
+    private readonly NeonLetterColorInteractionBackfillCursor
+        _backfill = new();
+    private WeakReference<TTemplate>? _template;
+
+    internal NeonLetterColorInteractionPromptLifecycle(
+        Func<TTemplate, bool> isAlive)
+    {
+        ArgumentNullException.ThrowIfNull(isAlive);
+        _isAlive = isAlive;
+    }
+
+    internal ulong Generation { get; private set; }
+    internal bool IsBackfillPending => _backfill.IsActive;
+
+    internal int RetainedTemplateCount =>
+        TryGetTemplate(out _) ? 1 : 0;
+
+    internal NeonLetterColorInteractionPromptObservationResult Observe(
+        NeonLetterColorInteractionPromptCandidate<TTemplate> candidate)
+    {
+        if (candidate.IsOwnedColorInteraction ||
+            !candidate.UsesNativeUseAction ||
+            !candidate.HasInteractionGui ||
+            !candidate.HasDynamicInputIcon ||
+            candidate.Template == null)
+        {
+            return NeonLetterColorInteractionPromptObservationResult
+                .Ignored;
+        }
+
+        if (TryGetTemplate(out _))
+        {
+            return NeonLetterColorInteractionPromptObservationResult
+                .Unchanged;
+        }
+
+        _template =
+            new WeakReference<TTemplate>(candidate.Template);
+        if (Generation < ulong.MaxValue)
+        {
+            Generation++;
+        }
+
+        _backfill.StartCycle();
+        return NeonLetterColorInteractionPromptObservationResult.Accepted;
+    }
+
+    internal bool TryGetTemplate(out TTemplate? template)
+    {
+        if (_template != null &&
+            _template.TryGetTarget(out template) &&
+            template != null &&
+            _isAlive(template))
+        {
+            return true;
+        }
+
+        _template = null;
+        _backfill.Reset();
+        template = null;
+        return false;
+    }
+
+    internal void StartBackfillIfTemplateAvailable()
+    {
+        if (TryGetTemplate(out _))
+        {
+            _backfill.StartCycle();
+        }
+    }
+
+    internal NeonLetterColorInteractionBackfillWindow TakeBackfillWindow(
+        int itemCount,
+        int maximumItems)
+    {
+        return _backfill.TakeWindow(itemCount, maximumItems);
+    }
+
+    internal void ReportBackfillUnavailable()
+    {
+        _backfill.ReportUnavailable();
+    }
+
+    internal void Reset()
+    {
+        _template = null;
+        Generation = 0;
+        _backfill.Reset();
+    }
+}
+
+internal sealed class NeonLetterColorInteractionBackfillSchedule
 {
     internal const long RetryUpdateDelay = 120;
     private long _nextAttemptTick;
@@ -324,60 +436,6 @@ internal sealed class NeonLetterColorInteractionPromptDiscoverySchedule
     internal void Reset()
     {
         _nextAttemptTick = 0;
-    }
-}
-
-internal readonly record struct
-    NeonLetterColorInteractionPromptCandidateWindow(
-        int StartOffset,
-        int Count,
-        int NextOffset);
-
-internal static class
-    NeonLetterColorInteractionPromptCandidateWindowPolicy
-{
-    internal static NeonLetterColorInteractionPromptCandidateWindow Resolve(
-        int candidateCount,
-        int startOffset,
-        int maximumCandidates)
-    {
-        if (candidateCount < 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(candidateCount));
-        }
-
-        if (startOffset < 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(startOffset));
-        }
-
-        if (maximumCandidates <= 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(maximumCandidates));
-        }
-
-        if (candidateCount == 0)
-        {
-            return new NeonLetterColorInteractionPromptCandidateWindow(
-                StartOffset: 0,
-                Count: 0,
-                NextOffset: 0);
-        }
-
-        int normalizedStart = startOffset % candidateCount;
-        int count = Math.Min(
-            maximumCandidates,
-            candidateCount - normalizedStart);
-        int nextOffset =
-            normalizedStart + count == candidateCount
-                ? 0
-                : normalizedStart + count;
-        return new NeonLetterColorInteractionPromptCandidateWindow(
-            normalizedStart,
-            count,
-            nextOffset);
     }
 }
 

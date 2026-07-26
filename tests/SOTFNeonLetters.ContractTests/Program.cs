@@ -3811,6 +3811,10 @@ void CheckColorRuntimeSafetyContract()
         FindRepositoryFile("NeonLetterColorInteractionRuntime.cs")
         ?? throw new InvalidOperationException(
             "Could not find the native color interaction adapter.");
+    string modRuntimePath = FindRepositoryFile("SOTFNeonLetters.cs")
+        ?? throw new InvalidOperationException(
+            "Could not find the mod lifecycle adapter.");
+    string modRuntimeSource = File.ReadAllText(modRuntimePath);
     string source =
         File.ReadAllText(runtimePath) +
         Environment.NewLine +
@@ -3957,20 +3961,79 @@ void CheckColorRuntimeSafetyContract()
             StringComparison.Ordinal),
         "interaction cleanup never destroys the borrowed vanilla prompt template");
     CheckEqual(
+        false,
+        source.Contains(
+            "Resources.FindObjectsOfTypeAll<GenericInteraction>",
+            StringComparison.Ordinal),
+        "native prompt discovery never materializes every GenericInteraction");
+    CheckEqual(
         true,
         source.Contains(
-            "NeonLetterColorInteractionPromptDiscoverySchedule",
+            "nameof(GenericInteraction.OnEnable)",
             StringComparison.Ordinal) &&
         source.Contains(
-            "NeonLetterColorInteractionBackfillCursor",
+            "OwnedInteractionInstanceIds",
             StringComparison.Ordinal) &&
         source.Contains(
-            "MaxPromptCandidatesPerDiscovery",
+            "NeonLetterColorInteractionPromptLifecycle",
+            StringComparison.Ordinal),
+        "native prompt discovery observes one GenericInteraction lifecycle event at a time");
+    int promptObservationStarted = modRuntimeSource.IndexOf(
+        "BeginInteractionPromptObservation();",
+        StringComparison.Ordinal);
+    int sdkInitializationStarted = modRuntimeSource.IndexOf(
+        "protected override void OnSdkInitialized()",
+        StringComparison.Ordinal);
+    CheckEqual(
+        true,
+        promptObservationStarted >= 0 &&
+        promptObservationStarted < sdkInitializationStarted &&
+        modRuntimeSource.Contains(
+            "CompleteStage(" +
+            "NeonLetterColorRuntime.EndInteractionPromptObservation)",
+            StringComparison.Ordinal),
+        "prompt observation starts before SDK world interactions and has loader-owned lifecycle cleanup");
+    int endObservation = source.IndexOf(
+        "internal static void EndInteractionPromptObservation()",
+        StringComparison.Ordinal);
+    int observePrompt = source.IndexOf(
+        "internal static void ObserveNativeInteractionPrompt(",
+        StringComparison.Ordinal);
+    int resetDiscovery = source.IndexOf(
+        "private static void ResetInteractionDiscovery()",
+        StringComparison.Ordinal);
+    int leaseDeclaration = source.IndexOf(
+        "private sealed class ColorInteractionLease",
+        StringComparison.Ordinal);
+    string endObservationSource =
+        endObservation >= 0 && observePrompt > endObservation
+            ? source.Substring(
+                endObservation,
+                observePrompt - endObservation)
+            : string.Empty;
+    string resetDiscoverySource =
+        resetDiscovery >= 0 && leaseDeclaration > resetDiscovery
+            ? source.Substring(
+                resetDiscovery,
+                leaseDeclaration - resetDiscovery)
+            : string.Empty;
+    CheckEqual(
+        true,
+        endObservationSource.Contains(
+            "_acceptPromptObservations = false",
             StringComparison.Ordinal) &&
-        CountOccurrences(
-            source,
-            "Resources.FindObjectsOfTypeAll<GenericInteraction>()") == 1,
-        "vanilla prompt discovery is cached and retried through one named bounded scan path");
+        !resetDiscoverySource.Contains(
+            "_acceptPromptObservations = false",
+            StringComparison.Ordinal),
+        "world reset preserves prompt observation while mod cleanup closes the postfix gate");
+    int ownedInteractionRegistered = source.IndexOf(
+        "OwnedInteractionInstanceIds.Add(",
+        StringComparison.Ordinal);
+    CheckEqual(
+        true,
+        ownedInteractionRegistered >= 0 &&
+        ownedInteractionRegistered < holderActivated,
+        "owned color interactions are registered before their inactive holder is activated");
     CheckEqual(
         true,
         source.Contains(

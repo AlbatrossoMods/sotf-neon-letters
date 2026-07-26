@@ -41,6 +41,7 @@ public static partial class NeonLetterColorRuntime
             return;
         }
 
+        BeginInteractionPromptObservation();
         try
         {
             SdkEvents.OnAfterSpawn.Subscribe(
@@ -85,7 +86,7 @@ public static partial class NeonLetterColorRuntime
         PersistentColors.Clear();
         EmissionBindings.Clear();
         ReleaseAllInteractions();
-        ResetInteractionDiscovery();
+        EndInteractionPromptObservation();
         RestoreLifecycle.Deinitialize();
         ResetRestoreReadiness();
     }

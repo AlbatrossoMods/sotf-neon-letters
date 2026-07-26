@@ -16,7 +16,6 @@ public static partial class NeonLetterColorRuntime
 {
     private const int MaxInteractionLeaseSweepsPerUpdate = 16;
     private const int MaxInteractionBackfillsPerUpdate = 64;
-    private const int MaxPromptCandidatesPerDiscovery = 256;
     private const string NativeUseAction = "Use";
     private const string InteractionHolderName =
         "SOTFNeonLetters.ColorInteractionHolder";
@@ -28,15 +27,81 @@ public static partial class NeonLetterColorRuntime
         ColorInteractionLease> InteractionLeases = new();
     private static readonly NeonLetterColorInteractionFailureGate
         InteractionFailureGate = new();
-    private static readonly NeonLetterColorInteractionPromptDiscoverySchedule
-        PromptDiscoverySchedule = new();
-    private static readonly NeonLetterColorInteractionPromptDiscoverySchedule
+    private static readonly HashSet<int> OwnedInteractionInstanceIds = new();
+    private static readonly NeonLetterColorInteractionPromptLifecycle<
+        GameObject> PromptLifecycle = new(IsPromptTemplateAlive);
+    private static readonly NeonLetterColorInteractionBackfillSchedule
         BackfillSchedule = new();
-    private static readonly NeonLetterColorInteractionBackfillCursor
-        BackfillCursor = new();
     private static long _interactionUpdateTick;
-    private static int _promptCandidateOffset;
-    private static WeakReference<GameObject> _promptTemplate;
+    private static bool _acceptPromptObservations;
+    private static bool _isObservingPrompt;
+
+    internal static void BeginInteractionPromptObservation()
+    {
+        _acceptPromptObservations = !IsDedicatedOrHeadless();
+    }
+
+    internal static void EndInteractionPromptObservation()
+    {
+        _acceptPromptObservations = false;
+        ResetInteractionDiscovery();
+    }
+
+    internal static void ObserveNativeInteractionPrompt(
+        GenericInteraction interaction)
+    {
+        if (!_acceptPromptObservations ||
+            _isObservingPrompt ||
+            interaction == null)
+        {
+            return;
+        }
+
+        _isObservingPrompt = true;
+        try
+        {
+            GameObject interactionObject = interaction.gameObject;
+            GameObject prompt = interaction._interactGui;
+            bool isOwned =
+                interactionObject != null &&
+                OwnedInteractionInstanceIds.Contains(
+                    interactionObject.GetInstanceID());
+            DynamicInputIcon inputIcon =
+                prompt == null
+                    ? null
+                    : prompt.GetComponentInChildren<DynamicInputIcon>(true);
+            NeonLetterColorInteractionPromptObservationResult result =
+                PromptLifecycle.Observe(
+                    new NeonLetterColorInteractionPromptCandidate<GameObject>(
+                        IsOwnedColorInteraction: isOwned,
+                        UsesNativeUseAction: string.Equals(
+                            interaction._actionId,
+                            NativeUseAction,
+                            StringComparison.Ordinal),
+                        HasInteractionGui: prompt != null,
+                        HasDynamicInputIcon: inputIcon != null,
+                        prompt));
+            if (result !=
+                NeonLetterColorInteractionPromptObservationResult.Accepted)
+            {
+                return;
+            }
+
+            BackfillSchedule.Reset();
+            BackfillSchedule.TryBeginAttempt(_interactionUpdateTick);
+            InteractionFailureGate.ResetPromptFailureReport();
+        }
+        catch (Exception exception)
+        {
+            RLog.Error(
+                $"[SOTFNeonLetters] Native prompt observation failed: " +
+                exception);
+        }
+        finally
+        {
+            _isObservingPrompt = false;
+        }
+    }
 
     internal static void RegisterColorInteraction(
         IScrewStructure registeredStructure)
@@ -79,7 +144,7 @@ public static partial class NeonLetterColorRuntime
                 DisposeInteractionLease(existingLease);
             }
 
-            if (!TryResolvePromptTemplate(out GameObject promptTemplate) ||
+            if (!TryGetPromptTemplate(out GameObject promptTemplate) ||
                 !NeonLetterColorInteractionPolicy.ShouldCreateLease(
                     isDedicatedOrHeadless: false,
                     hasCompletedStructure: true,
@@ -123,6 +188,8 @@ public static partial class NeonLetterColorRuntime
                 return;
             }
 
+            OwnedInteractionInstanceIds.Add(
+                lease.InteractionInstanceId);
             try
             {
                 lease.Activate();
@@ -341,62 +408,11 @@ public static partial class NeonLetterColorRuntime
         }
     }
 
-    private static bool TryResolvePromptTemplate(
+    private static bool TryGetPromptTemplate(
         out GameObject promptTemplate)
     {
-        if (TryGetCachedPromptTemplate(out promptTemplate))
+        if (PromptLifecycle.TryGetTemplate(out promptTemplate))
         {
-            return true;
-        }
-
-        if (!PromptDiscoverySchedule.TryBeginAttempt(
-                _interactionUpdateTick))
-        {
-            promptTemplate = null;
-            return false;
-        }
-
-        GenericInteraction[] interactions =
-            Resources.FindObjectsOfTypeAll<GenericInteraction>();
-        NeonLetterColorInteractionPromptCandidateWindow window =
-            NeonLetterColorInteractionPromptCandidateWindowPolicy.Resolve(
-                interactions.Length,
-                _promptCandidateOffset,
-                MaxPromptCandidatesPerDiscovery);
-        _promptCandidateOffset = window.NextOffset;
-        int endOffset = window.StartOffset + window.Count;
-        for (int index = window.StartOffset;
-             index < endOffset;
-             index++)
-        {
-            GenericInteraction candidate = interactions[index];
-            GameObject candidateObject = candidate?.gameObject;
-            GameObject candidatePrompt = candidate?._interactGui;
-            if (candidate == null ||
-                candidateObject == null ||
-                candidatePrompt == null ||
-                string.Equals(
-                    candidateObject.name,
-                    InteractionProxyName,
-                    StringComparison.Ordinal) ||
-                !string.Equals(
-                    candidate._actionId,
-                    NativeUseAction,
-                    StringComparison.Ordinal) ||
-                candidatePrompt.GetComponentInChildren<DynamicInputIcon>(
-                    true) == null)
-            {
-                continue;
-            }
-
-            promptTemplate = candidatePrompt;
-            _promptTemplate =
-                new WeakReference<GameObject>(promptTemplate);
-            _promptCandidateOffset = 0;
-            BackfillCursor.StartCycle();
-            BackfillSchedule.Reset();
-            BackfillSchedule.TryBeginAttempt(_interactionUpdateTick);
-            InteractionFailureGate.ResetPromptFailureReport();
             return true;
         }
 
@@ -405,22 +421,11 @@ public static partial class NeonLetterColorRuntime
         return false;
     }
 
-    private static bool TryGetCachedPromptTemplate(
-        out GameObject promptTemplate)
+    private static bool IsPromptTemplateAlive(GameObject promptTemplate)
     {
-        if (_promptTemplate != null &&
-            _promptTemplate.TryGetTarget(out promptTemplate) &&
-            promptTemplate != null &&
-            promptTemplate.GetComponentInChildren<DynamicInputIcon>(
-                true) != null)
-        {
-            return true;
-        }
-
-        _promptTemplate = null;
-        BackfillCursor.Reset();
-        promptTemplate = null;
-        return false;
+        return promptTemplate != null &&
+               promptTemplate.GetComponentInChildren<DynamicInputIcon>(
+                   true) != null;
     }
 
     private static void LogMissingPromptOnce()
@@ -554,19 +559,16 @@ public static partial class NeonLetterColorRuntime
             DisposeInteractionLease(expiredLeases[index]);
         }
 
-        bool hasPromptTemplate =
-            TryGetCachedPromptTemplate(out _);
-        if (!hasPromptTemplate &&
-            !TryResolvePromptTemplate(out _))
+        if (!PromptLifecycle.TryGetTemplate(out _))
         {
             return;
         }
 
-        if (!BackfillCursor.IsActive &&
+        if (!PromptLifecycle.IsBackfillPending &&
             BackfillSchedule.TryBeginAttempt(
                 _interactionUpdateTick))
         {
-            BackfillCursor.StartCycle();
+            PromptLifecycle.StartBackfillIfTemplateAvailable();
         }
 
         AdvanceInteractionBackfill();
@@ -609,7 +611,7 @@ public static partial class NeonLetterColorRuntime
 
     private static void AdvanceInteractionBackfill()
     {
-        if (!BackfillCursor.IsActive)
+        if (!PromptLifecycle.IsBackfillPending)
         {
             return;
         }
@@ -618,14 +620,14 @@ public static partial class NeonLetterColorRuntime
                 out ScrewStructureManager manager) ||
             manager._structures == null)
         {
-            BackfillCursor.ReportUnavailable();
+            PromptLifecycle.ReportBackfillUnavailable();
             return;
         }
 
         Il2CppSystem.Collections.Generic.List<IScrewStructure> structures =
             manager._structures;
         NeonLetterColorInteractionBackfillWindow window =
-            BackfillCursor.TakeWindow(
+            PromptLifecycle.TakeBackfillWindow(
                 structures.Count,
                 MaxInteractionBackfillsPerUpdate);
         int endOffset = window.StartOffset + window.Count;
@@ -662,6 +664,8 @@ public static partial class NeonLetterColorRuntime
             return;
         }
 
+        OwnedInteractionInstanceIds.Remove(
+            lease.InteractionInstanceId);
         try
         {
             SOTFNeonLettersUi.OnStructureUnavailable(
@@ -688,12 +692,11 @@ public static partial class NeonLetterColorRuntime
 
     private static void ResetInteractionDiscovery()
     {
-        _promptTemplate = null;
+        _isObservingPrompt = false;
         _interactionUpdateTick = 0;
-        _promptCandidateOffset = 0;
-        PromptDiscoverySchedule.Reset();
+        OwnedInteractionInstanceIds.Clear();
+        PromptLifecycle.Reset();
         BackfillSchedule.Reset();
-        BackfillCursor.Reset();
         InteractionFailureGate.ResetPromptFailureReport();
     }
 
@@ -726,6 +729,7 @@ public static partial class NeonLetterColorRuntime
             _structureRoot = structureRoot;
             _interactionHolder = interactionHolder;
             _interactionProxy = interactionProxy;
+            InteractionInstanceId = interactionProxy.GetInstanceID();
             _interaction = interaction;
             _ownedPrompt = ownedPrompt;
             _managedCallback = OnActionPerformed;
@@ -735,6 +739,7 @@ public static partial class NeonLetterColorRuntime
         }
 
         internal int StructureInstanceId { get; }
+        internal int InteractionInstanceId { get; }
         internal int RecipeId { get; }
         internal bool CallbackRegistered => _callbackRegistered;
         internal bool IsDismantling { get; set; }
@@ -878,5 +883,17 @@ internal static class NeonLetterColorInteractionUnregisterPatch
     private static void BeforeUnregister(IScrewStructure __0)
     {
         NeonLetterColorRuntime.UnregisterColorInteraction(__0);
+    }
+}
+
+[HarmonyPatch(
+    typeof(GenericInteraction),
+    nameof(GenericInteraction.OnEnable))]
+internal static class NeonLetterColorInteractionPromptObservationPatch
+{
+    [HarmonyPostfix]
+    private static void AfterOnEnable(GenericInteraction __instance)
+    {
+        NeonLetterColorRuntime.ObserveNativeInteractionPrompt(__instance);
     }
 }
