@@ -35,6 +35,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
     private readonly NeonLetterMonotonicSequence _restoreSignals = new();
     private readonly NeonLetterMultiplayerRestoreLoadQueue
         _queuedLoads = new();
+    private readonly object _restoreStateSync = new();
     private readonly Dictionary<int, RestoreTarget> _nativeTargets = new();
     private readonly Dictionary<int, StructureRecipe> _processedRecipes = new();
     private readonly Func<
@@ -257,8 +258,11 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
     private void OnInWorldUpdate()
     {
-        DrainQueuedLoad();
-        AdvanceRestore();
+        lock (_restoreStateSync)
+        {
+            DrainQueuedLoad();
+            AdvanceRestore();
+        }
     }
 
     private void OnWorldExited()
@@ -279,30 +283,33 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         bool rollbackOwnedFallbacks,
         bool resumeLoads)
     {
-        _queuedLoads.SuspendAndClear();
-        try
+        lock (_restoreStateSync)
         {
-            if (rollbackOwnedFallbacks)
-            {
-                _restoreCoordinator.Clear();
-            }
-            else
-            {
-                _restoreCoordinator.AbandonWithoutWorldMutation();
-            }
-        }
-        finally
-        {
-            _nativeTargets.Clear();
-            _processedRecipes.Clear();
-            _afterLoadSaveReceived = false;
-            _afterSpawnReceived = false;
-            _restoreReadiness.Reset();
-            _restoreUpdateTick = 0;
             _queuedLoads.SuspendAndClear();
-            if (resumeLoads && _initialized)
+            try
             {
-                _queuedLoads.Resume();
+                if (rollbackOwnedFallbacks)
+                {
+                    _restoreCoordinator.Clear();
+                }
+                else
+                {
+                    _restoreCoordinator.AbandonWithoutWorldMutation();
+                }
+            }
+            finally
+            {
+                _nativeTargets.Clear();
+                _processedRecipes.Clear();
+                _afterLoadSaveReceived = false;
+                _afterSpawnReceived = false;
+                _restoreReadiness.Reset();
+                _restoreUpdateTick = 0;
+                _queuedLoads.SuspendAndClear();
+                if (resumeLoads && _initialized)
+                {
+                    _queuedLoads.Resume();
+                }
             }
         }
     }
@@ -310,12 +317,12 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
     private void DrainQueuedLoad()
     {
         if (!_queuedLoads.TryDequeue(
-                out NeonLetterMultiplayerSaveEnvelope envelope))
+                out NeonLetterMultiplayerRestoreSnapshot snapshot))
         {
             return;
         }
 
-        _restoreCoordinator.Stage(envelope);
+        _restoreCoordinator.StageSnapshot(snapshot);
         ResolveKnownNetworkRole();
     }
 
@@ -457,7 +464,10 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
     private void SignalRestoreProgress()
     {
-        _restoreSignals.Advance();
+        lock (_restoreStateSync)
+        {
+            _restoreSignals.Advance();
+        }
     }
 
     private readonly record struct MultiplayerRestoreProgress(

@@ -3942,6 +3942,12 @@ void CheckColorRuntimeSafetyContract()
             "resumeLoads: false",
             StringComparison.Ordinal),
         "deinitialization keeps multiplayer load intake suspended");
+    CheckEqual(
+        3,
+        CountOccurrences(
+            multiplayerSaveRuntimeSource,
+            "lock (_restoreStateSync)"),
+        "multiplayer update, reset, and readiness signals serialize state");
 
     string uiPath = FindRepositoryFile("SOTFNeonLettersUi.cs")
         ?? throw new InvalidOperationException("Could not find the color editor UI adapter.");

@@ -134,52 +134,220 @@ public readonly record struct NeonLetterMultiplayerRestoreObservation<TTarget>(
     int? ResolvedRecipeId = null)
     where TTarget : class;
 
+internal sealed class NeonLetterMultiplayerRestoreEntrySnapshot
+{
+    internal NeonLetterMultiplayerRestoreEntrySnapshot(
+        NeonLetterMultiplayerSaveEntry entry)
+    {
+        RecipeId = entry.RecipeId;
+        NativeSaveId = entry.NativeSaveId;
+        RestoreEntry = new NeonLetterMultiplayerSaveEntry
+        {
+            RecipeId = entry.RecipeId,
+            NativeSaveId = entry.NativeSaveId,
+            Position = new NeonVector3(
+                entry.Position.X,
+                entry.Position.Y,
+                entry.Position.Z),
+            Rotation = new NeonQuaternion(
+                entry.Rotation.X,
+                entry.Rotation.Y,
+                entry.Rotation.Z,
+                entry.Rotation.W),
+            PackedColor = entry.PackedColor
+        };
+    }
+
+    internal int RecipeId { get; }
+    internal int NativeSaveId { get; }
+
+    // This owned callback view is not authoritative restore state.
+    internal NeonLetterMultiplayerSaveEntry RestoreEntry { get; }
+}
+
+internal sealed class NeonLetterMultiplayerRestoreSnapshot
+{
+    private static readonly NeonLetterMultiplayerRestoreSnapshot EmptySnapshot =
+        new(new List<NeonLetterMultiplayerRestoreEntrySnapshot>());
+    private readonly IReadOnlyList<NeonLetterMultiplayerRestoreEntrySnapshot>
+        _entries;
+
+    private NeonLetterMultiplayerRestoreSnapshot(
+        List<NeonLetterMultiplayerRestoreEntrySnapshot> entries)
+    {
+        _entries = entries.AsReadOnly();
+    }
+
+    internal static NeonLetterMultiplayerRestoreSnapshot Empty =>
+        EmptySnapshot;
+
+    internal IReadOnlyList<NeonLetterMultiplayerRestoreEntrySnapshot> Entries =>
+        _entries;
+
+    internal static NeonLetterMultiplayerRestoreSnapshot Sanitize(
+        NeonLetterMultiplayerSaveEnvelope? envelope,
+        Action? onEntryVisited = null)
+    {
+        if (envelope == null ||
+            envelope.Version != NeonLetterMultiplayerSaveEnvelope.CurrentVersion ||
+            envelope.Entries == null)
+        {
+            return Empty;
+        }
+
+        var entries =
+            new List<NeonLetterMultiplayerRestoreEntrySnapshot>(
+                envelope.Entries.Count);
+        foreach (NeonLetterMultiplayerSaveEntry? entry in envelope.Entries)
+        {
+            onEntryVisited?.Invoke();
+            NeonLetterMultiplayerRestoreEntrySnapshot? snapshotEntry =
+                NeonLetterMultiplayerPersistencePolicy
+                    .CreateRestoreSnapshotEntry(entry);
+            if (snapshotEntry != null)
+            {
+                entries.Add(snapshotEntry);
+            }
+        }
+
+        return entries.Count == 0
+            ? Empty
+            : new NeonLetterMultiplayerRestoreSnapshot(entries);
+    }
+
+    internal NeonLetterMultiplayerSaveEnvelope ToEnvelope()
+    {
+        return new NeonLetterMultiplayerSaveEnvelope
+        {
+            Entries = _entries
+                .Select(entry => entry.RestoreEntry)
+                .ToList()
+        };
+    }
+}
+
 internal sealed class NeonLetterMultiplayerRestoreLoadQueue
 {
-    private NeonLetterMultiplayerSaveEnvelope? _pending;
+    private readonly object _sync = new();
+    private readonly Func<
+        NeonLetterMultiplayerSaveEnvelope?,
+        NeonLetterMultiplayerRestoreSnapshot> _sanitize;
+    private readonly NeonLetterMonotonicSequence _sequences = new();
+    private NeonLetterMultiplayerRestoreSnapshot? _pending;
     private bool _accepting = true;
+    private object _generation = new();
+    private ulong _latestPublishedSequence;
 
-    internal bool HasPending => _pending != null;
+    internal NeonLetterMultiplayerRestoreLoadQueue()
+        : this(
+            envelope =>
+                NeonLetterMultiplayerRestoreSnapshot.Sanitize(envelope))
+    {
+    }
+
+    internal NeonLetterMultiplayerRestoreLoadQueue(
+        Func<
+            NeonLetterMultiplayerSaveEnvelope?,
+            NeonLetterMultiplayerRestoreSnapshot> sanitize)
+    {
+        ArgumentNullException.ThrowIfNull(sanitize);
+        _sanitize = sanitize;
+    }
+
+    internal bool HasPending
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _pending != null;
+            }
+        }
+    }
 
     internal bool Enqueue(NeonLetterMultiplayerSaveEnvelope? envelope)
     {
-        if (!_accepting)
+        return Enqueue(envelope, out _);
+    }
+
+    internal bool Enqueue(
+        NeonLetterMultiplayerSaveEnvelope? envelope,
+        out ulong sequence)
+    {
+        object generation;
+        lock (_sync)
         {
-            return false;
+            if (!_accepting)
+            {
+                sequence = 0;
+                return false;
+            }
+
+            sequence = _sequences.Advance();
+            generation = _generation;
         }
 
-        _pending = NeonLetterMultiplayerPersistencePolicy.Sanitize(envelope);
-        return true;
+        NeonLetterMultiplayerRestoreSnapshot snapshot = _sanitize(envelope);
+        lock (_sync)
+        {
+            if (!_accepting ||
+                !ReferenceEquals(generation, _generation))
+            {
+                return false;
+            }
+
+            if (sequence > _latestPublishedSequence)
+            {
+                _latestPublishedSequence = sequence;
+                _pending = snapshot;
+            }
+
+            return true;
+        }
     }
 
     internal bool TryDequeue(
-        out NeonLetterMultiplayerSaveEnvelope envelope)
+        out NeonLetterMultiplayerRestoreSnapshot snapshot)
     {
-        if (_pending == null)
+        lock (_sync)
         {
-            envelope = new NeonLetterMultiplayerSaveEnvelope();
-            return false;
-        }
+            if (_pending == null)
+            {
+                snapshot = NeonLetterMultiplayerRestoreSnapshot.Empty;
+                return false;
+            }
 
-        envelope = _pending;
-        _pending = null;
-        return true;
+            snapshot = _pending;
+            _pending = null;
+            return true;
+        }
     }
 
     internal void Clear()
     {
-        _pending = null;
+        lock (_sync)
+        {
+            _generation = new object();
+            _pending = null;
+        }
     }
 
     internal void SuspendAndClear()
     {
-        _accepting = false;
-        _pending = null;
+        lock (_sync)
+        {
+            _accepting = false;
+            _generation = new object();
+            _pending = null;
+        }
     }
 
     internal void Resume()
     {
-        _accepting = true;
+        lock (_sync)
+        {
+            _accepting = true;
+        }
     }
 }
 
@@ -194,7 +362,8 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         LinkedListNode<PendingRestore>> _snapshotPool =
             new();
     private readonly NeonLetterMonotonicSequence _epochs;
-    private NeonLetterMultiplayerSaveEnvelope _stagedEnvelope = new();
+    private NeonLetterMultiplayerRestoreSnapshot _stagedSnapshot =
+        NeonLetterMultiplayerRestoreSnapshot.Empty;
     private LinkedListNode<PendingRestore>? _nextPending;
     private NeonLetterMultiplayerRestoreRole _role;
     private bool _hasStagedEnvelope;
@@ -239,11 +408,17 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
 
     public void Stage(NeonLetterMultiplayerSaveEnvelope? envelope)
     {
-        NeonLetterMultiplayerSaveEnvelope stagedEnvelope =
-            NeonLetterMultiplayerPersistencePolicy.Sanitize(envelope);
+        StageSnapshot(
+            NeonLetterMultiplayerRestoreSnapshot.Sanitize(envelope));
+    }
+
+    internal void StageSnapshot(
+        NeonLetterMultiplayerRestoreSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
         BeginNextRestoreEpoch(abandonWithoutMutation: false);
         List<OwnedFallback>? ownedFallbacks = DetachLoadedState();
-        _stagedEnvelope = stagedEnvelope;
+        _stagedSnapshot = snapshot;
         _hasStagedEnvelope = true;
         List<OwnedFallback>? displacedFallbacks = ApplyRoleToLoadedState();
         RollbackFallbacks(ownedFallbacks);
@@ -578,7 +753,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
             case NeonLetterMultiplayerRestoreObservationKind.NativeRecipeMismatch:
                 if (!observation.ResolvedRecipeId.HasValue ||
                     observation.ResolvedRecipeId.Value ==
-                    pending.Entry.RecipeId)
+                    pending.SnapshotEntry.RecipeId)
                 {
                     throw new InvalidOperationException(
                         "A terminal native recipe mismatch requires " +
@@ -607,7 +782,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                     break;
                 }
 
-                if (pending.Entry.NativeSaveId != 0)
+                if (pending.SnapshotEntry.NativeSaveId != 0)
                 {
                     NeonLetterMultiplayerRestoreObservation<TTarget>
                         finalObservation = observe(
@@ -828,14 +1003,11 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
             return;
         }
 
-        NeonLetterMultiplayerSaveEnvelope accepted =
-            NeonLetterMultiplayerPersistencePolicy.AcceptLoadedWorldPayload(
-                isMultiplayer: true,
-                isHost: true,
-                _stagedEnvelope);
-        _stagedEnvelope = new NeonLetterMultiplayerSaveEnvelope();
+        NeonLetterMultiplayerRestoreSnapshot accepted = _stagedSnapshot;
+        _stagedSnapshot = NeonLetterMultiplayerRestoreSnapshot.Empty;
         _hasStagedEnvelope = false;
-        foreach (NeonLetterMultiplayerSaveEntry entry in accepted.Entries)
+        foreach (NeonLetterMultiplayerRestoreEntrySnapshot entry in
+                 accepted.Entries)
         {
             _pending.AddLast(new PendingRestore(entry));
         }
@@ -872,7 +1044,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
             }
         }
 
-        _stagedEnvelope = new NeonLetterMultiplayerSaveEnvelope();
+        _stagedSnapshot = NeonLetterMultiplayerRestoreSnapshot.Empty;
         _hasStagedEnvelope = false;
         _pending.Clear();
         _nextPending = null;
@@ -902,12 +1074,18 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
     {
         private OwnedFallback? _ownedFallback;
 
-        public PendingRestore(NeonLetterMultiplayerSaveEntry entry)
+        public PendingRestore(
+            NeonLetterMultiplayerRestoreEntrySnapshot snapshotEntry)
         {
-            Entry = entry;
-            State = new NeonLetterMultiplayerRestoreEntryState(entry);
+            SnapshotEntry = snapshotEntry;
+            Entry = snapshotEntry.RestoreEntry;
+            State = new NeonLetterMultiplayerRestoreEntryState(Entry);
         }
 
+        public NeonLetterMultiplayerRestoreEntrySnapshot SnapshotEntry
+        {
+            get;
+        }
         public NeonLetterMultiplayerSaveEntry Entry { get; }
         public NeonLetterMultiplayerRestoreEntryState State { get; }
         public TTarget? SpawnedTarget { get; set; }
@@ -1019,32 +1197,28 @@ public static class NeonLetterMultiplayerPersistencePolicy
     public static NeonLetterMultiplayerSaveEnvelope Sanitize(
         NeonLetterMultiplayerSaveEnvelope? envelope)
     {
-        var snapshot = new NeonLetterMultiplayerSaveEnvelope();
-        if (envelope == null ||
-            envelope.Version != NeonLetterMultiplayerSaveEnvelope.CurrentVersion ||
-            envelope.Entries == null)
+        return NeonLetterMultiplayerRestoreSnapshot
+            .Sanitize(envelope)
+            .ToEnvelope();
+    }
+
+    internal static NeonLetterMultiplayerRestoreEntrySnapshot?
+        CreateRestoreSnapshotEntry(
+            NeonLetterMultiplayerSaveEntry? entry)
+    {
+        if (entry == null ||
+            !KnownRecipeIds.Contains(entry.RecipeId) ||
+            !IsFinite(entry.Position) ||
+            !IsValidRotation(entry.Rotation) ||
+            !TryDecodeColor(
+                NeonLetterNetworkProtocol.CurrentVersion,
+                entry.PackedColor,
+                out _))
         {
-            return snapshot;
+            return null;
         }
 
-        foreach (NeonLetterMultiplayerSaveEntry? entry in envelope.Entries)
-        {
-            if (entry == null ||
-                !KnownRecipeIds.Contains(entry.RecipeId) ||
-                !IsFinite(entry.Position) ||
-                !IsValidRotation(entry.Rotation) ||
-                !TryDecodeColor(
-                    NeonLetterNetworkProtocol.CurrentVersion,
-                    entry.PackedColor,
-                    out _))
-            {
-                continue;
-            }
-
-            snapshot.Entries.Add(Copy(entry));
-        }
-
-        return snapshot;
+        return new NeonLetterMultiplayerRestoreEntrySnapshot(entry);
     }
 
     public static bool TryDecodeColor(
@@ -1064,26 +1238,6 @@ public static class NeonLetterMultiplayerPersistencePolicy
         {
             return false;
         }
-    }
-
-    private static NeonLetterMultiplayerSaveEntry Copy(
-        NeonLetterMultiplayerSaveEntry entry)
-    {
-        return new NeonLetterMultiplayerSaveEntry
-        {
-            RecipeId = entry.RecipeId,
-            NativeSaveId = entry.NativeSaveId,
-            Position = new NeonVector3(
-                entry.Position.X,
-                entry.Position.Y,
-                entry.Position.Z),
-            Rotation = new NeonQuaternion(
-                entry.Rotation.X,
-                entry.Rotation.Y,
-                entry.Rotation.Z,
-                entry.Rotation.W),
-            PackedColor = entry.PackedColor
-        };
     }
 
     private static bool IsFinite(NeonVector3? position)
