@@ -268,6 +268,89 @@ public sealed class MultiplayerSessionProtocolTests
                 coordinator.ResolvePendingRequestId(7)));
     }
 
+    [Theory]
+    [InlineData((int)NeonLetterApplyStatus.Accepted)]
+    [InlineData((int)NeonLetterApplyStatus.Rejected)]
+    public void DelayedPreviousSessionResultCannotResolveNewRequest(
+        int statusValue)
+    {
+        var coordinator = new NeonLetterClientApplyCoordinator<int>(
+            timeoutSeconds: 5d);
+        NeonLetterApplyRequest<int> previous =
+            coordinator.Start(7, Red, nowSeconds: 0d);
+        coordinator.Clear();
+        NeonLetterApplyRequest<int> current =
+            coordinator.Start(7, Blue, nowSeconds: 1d);
+
+        NeonLetterClientApplyDecision<int> delayed =
+            coordinator.AcceptResult(new NeonLetterApplyResult<int>(
+                previous.RequestId,
+                7,
+                (NeonLetterApplyStatus)statusValue,
+                Red,
+                Revision: 1));
+
+        Assert.Equal(
+            (1ul, 2ul, NeonLetterClientApplyAction.Ignored, 1, 2ul),
+            (
+                previous.RequestId,
+                current.RequestId,
+                delayed.Action,
+                coordinator.PendingCount,
+                coordinator.ResolvePendingRequestId(7)));
+    }
+
+    [Fact]
+    public void RepeatedCleanupPreservesRequestIdentityAndEmptySessionState()
+    {
+        var coordinator = new NeonLetterClientApplyCoordinator<int>(
+            timeoutSeconds: 5d);
+        coordinator.SeedAuthoritative(7, Red);
+        coordinator.Start(7, Blue, nowSeconds: 0d);
+
+        coordinator.Clear();
+        coordinator.Clear();
+        NeonLetterApplyRequest<int> current =
+            coordinator.Start(7, Green, nowSeconds: 1d);
+        NeonLetterAuthoritativeColor authoritative =
+            coordinator.ResolveAuthoritative(7);
+
+        Assert.Equal(
+            (2ul, 1, 2ul, NeonRgba.ProjectCyan, 0ul),
+            (
+                current.RequestId,
+                coordinator.PendingCount,
+                coordinator.ResolvePendingRequestId(7),
+                authoritative.Color,
+                authoritative.Revision));
+    }
+
+    [Fact]
+    public void RequestIdExhaustionFailsClosedAcrossCleanup()
+    {
+        var coordinator = new NeonLetterClientApplyCoordinator<int>(
+            timeoutSeconds: 5d,
+            firstRequestId: ulong.MaxValue);
+        NeonLetterApplyRequest<int> last =
+            coordinator.Start(7, Red, nowSeconds: 0d);
+
+        Exception? beforeCleanup = Record.Exception(
+            () => coordinator.Start(8, Blue, nowSeconds: 1d));
+        coordinator.Clear();
+        Exception? afterCleanup = Record.Exception(
+            () => coordinator.Start(9, Green, nowSeconds: 2d));
+
+        Assert.Equal(
+            (
+                ulong.MaxValue,
+                typeof(InvalidOperationException),
+                typeof(InvalidOperationException)),
+            (
+                last.RequestId,
+                beforeCleanup?.GetType(),
+                afterCleanup?.GetType()));
+    }
+
     [Fact]
     public void MatchingAcceptConfirmsAndStaleSupersededResultIsIgnored()
     {

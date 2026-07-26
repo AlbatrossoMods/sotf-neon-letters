@@ -195,16 +195,29 @@ internal sealed class NeonLetterClientApplyCoordinator<TKey>
     private readonly Dictionary<TKey, PendingApply> _pending = new();
     private readonly Dictionary<TKey, NeonLetterAuthoritativeColor>
         _authoritative = new();
-    private ulong _nextRequestId = 1;
+    private ulong _nextRequestId;
 
     public NeonLetterClientApplyCoordinator(double timeoutSeconds)
+        : this(timeoutSeconds, firstRequestId: 1)
+    {
+    }
+
+    internal NeonLetterClientApplyCoordinator(
+        double timeoutSeconds,
+        ulong firstRequestId)
     {
         if (!double.IsFinite(timeoutSeconds) || timeoutSeconds <= 0d)
         {
             throw new ArgumentOutOfRangeException(nameof(timeoutSeconds));
         }
 
+        if (firstRequestId == 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(firstRequestId));
+        }
+
         _timeoutSeconds = timeoutSeconds;
+        _nextRequestId = firstRequestId;
     }
 
     public int PendingCount => _pending.Count;
@@ -221,7 +234,10 @@ internal sealed class NeonLetterClientApplyCoordinator<TKey>
                 "The color request identifier space is exhausted.");
         }
 
-        ulong requestId = _nextRequestId++;
+        ulong requestId = _nextRequestId;
+        // Wrapping to zero after ulong.MaxValue permanently fails closed on
+        // the next call instead of emitting zero or reusing an identifier.
+        _nextRequestId = unchecked(requestId + 1);
         NeonRgba canonicalColor = NeonLetterNetworkProtocol.Unpack(
             NeonLetterNetworkProtocol.CurrentVersion,
             NeonLetterNetworkProtocol.Pack(color));
@@ -367,7 +383,8 @@ internal sealed class NeonLetterClientApplyCoordinator<TKey>
     {
         _pending.Clear();
         _authoritative.Clear();
-        _nextRequestId = 1;
+        // Wire results have no session epoch, so request IDs must remain
+        // process-lifetime identities across reconnects.
     }
 
     private void UpdateAuthoritative(
