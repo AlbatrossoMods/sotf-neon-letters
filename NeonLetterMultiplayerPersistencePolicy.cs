@@ -156,25 +156,28 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
 
     public void Stage(NeonLetterMultiplayerSaveEnvelope? envelope)
     {
-        _stagedEnvelope = NeonLetterMultiplayerPersistencePolicy.Sanitize(envelope);
+        NeonLetterMultiplayerSaveEnvelope stagedEnvelope =
+            NeonLetterMultiplayerPersistencePolicy.Sanitize(envelope);
+        List<OwnedFallback>? ownedFallbacks = DetachLoadedState();
+        _stagedEnvelope = stagedEnvelope;
         _hasStagedEnvelope = true;
-        _pending.Clear();
-        _nextPending = null;
-        _startedFallbackCount = 0;
-        ApplyRoleToLoadedState();
+        List<OwnedFallback>? displacedFallbacks = ApplyRoleToLoadedState();
+        RollbackFallbacks(ownedFallbacks);
+        RollbackFallbacks(displacedFallbacks);
     }
 
     public void SetRole(NeonLetterMultiplayerRestoreRole role)
     {
         ResetPendingReadiness();
         _role = role;
-        ApplyRoleToLoadedState();
+        RollbackFallbacks(ApplyRoleToLoadedState());
     }
 
     public void Clear()
     {
-        ClearLoadedState();
+        List<OwnedFallback>? ownedFallbacks = DetachLoadedState();
         _role = NeonLetterMultiplayerRestoreRole.Unknown;
+        RollbackFallbacks(ownedFallbacks);
     }
 
     public void Advance(
@@ -281,12 +284,24 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                         ref fallbackSpawns,
                         observe,
                         startFallback,
-                        applyRestored);
+                        applyRestored,
+                        onEntryError);
                 }
                 catch (Exception exception)
                 {
-                    RemovePending(currentNode);
-                    onEntryError(pending.Entry, exception);
+                    OwnedFallback? ownedFallback = RemovePending(currentNode);
+                    Exception? rollbackException =
+                        TryRollbackFallback(ownedFallback);
+                    try
+                    {
+                        onEntryError(pending.Entry, exception);
+                    }
+                    finally
+                    {
+                        ReportRollbackError(
+                            ownedFallback,
+                            rollbackException);
+                    }
                 }
             }
         }
@@ -306,7 +321,8 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         Func<NeonLetterMultiplayerSaveEntry, bool, TTarget?,
             NeonLetterMultiplayerRestoreObservation<TTarget>> observe,
         Func<NeonLetterMultiplayerSaveEntry, TTarget> startFallback,
-        Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored)
+        Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored,
+        Action<NeonLetterMultiplayerSaveEntry, Exception> onEntryError)
     {
         switch (observation.Kind)
         {
@@ -334,7 +350,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                 pending.State.Decide(
                     nativeIdentityResolved: true,
                     observation.ResolvedRecipeId.Value);
-                RemovePending(node);
+                RollbackFallback(RemovePending(node));
                 break;
 
             case NeonLetterMultiplayerRestoreObservationKind.NativeTargetReady:
@@ -374,7 +390,8 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                             ref fallbackSpawns,
                             observe,
                             startFallback,
-                            applyRestored);
+                            applyRestored,
+                            onEntryError);
                         break;
                     }
                 }
@@ -392,6 +409,13 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
 
                     fallbackSpawns++;
                     pending.SpawnedTarget = startFallback(pending.Entry);
+                    pending.ArmFallback(
+                        pending.SpawnedTarget,
+                        onEntryError);
+                    if (node.List != _pending)
+                    {
+                        RollbackFallback(pending.TakeOwnedFallback());
+                    }
                 }
                 break;
 
@@ -427,11 +451,12 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
             nowSeconds);
     }
 
-    private void RemovePending(LinkedListNode<PendingRestore> node)
+    private OwnedFallback? RemovePending(
+        LinkedListNode<PendingRestore> node)
     {
         if (node.List != _pending)
         {
-            return;
+            return node.Value.TakeOwnedFallback();
         }
 
         if (node.Value.State.FallbackSpawnStarted)
@@ -448,6 +473,8 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                 ? next
                 : _pending.First;
         }
+
+        return node.Value.TakeOwnedFallback();
     }
 
     private static void TrackReadinessOrThrow(
@@ -505,28 +532,57 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         _nextPending = _pending.First;
     }
 
-    private void ApplyRoleToLoadedState()
+    private List<OwnedFallback>? ApplyRoleToLoadedState()
     {
         switch (_role)
         {
             case NeonLetterMultiplayerRestoreRole.Host:
                 AcceptStagedEnvelopeForHost();
-                break;
+                return null;
 
             case NeonLetterMultiplayerRestoreRole.Client:
             case NeonLetterMultiplayerRestoreRole.SinglePlayer:
-                ClearLoadedState();
-                break;
+                return DetachLoadedState();
+
+            default:
+                return null;
         }
     }
 
-    private void ClearLoadedState()
+    private List<OwnedFallback>? DetachLoadedState()
     {
+        List<OwnedFallback>? ownedFallbacks = null;
+        foreach (PendingRestore pending in _pending)
+        {
+            OwnedFallback? ownedFallback = pending.TakeOwnedFallback();
+            if (ownedFallback != null)
+            {
+                (ownedFallbacks ??= new List<OwnedFallback>())
+                    .Add(ownedFallback);
+            }
+        }
+
         _stagedEnvelope = new NeonLetterMultiplayerSaveEnvelope();
         _hasStagedEnvelope = false;
         _pending.Clear();
         _nextPending = null;
         _startedFallbackCount = 0;
+
+        return ownedFallbacks;
+    }
+
+    private static void RollbackFallbacks(
+        List<OwnedFallback>? ownedFallbacks)
+    {
+        if (ownedFallbacks == null)
+        {
+            return;
+        }
+
+        foreach (OwnedFallback ownedFallback in ownedFallbacks)
+        {
+            RollbackFallback(ownedFallback);
+        }
     }
 
     private void ResetPendingReadiness()
@@ -539,6 +595,8 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
 
     private sealed class PendingRestore
     {
+        private OwnedFallback? _ownedFallback;
+
         public PendingRestore(NeonLetterMultiplayerSaveEntry entry)
         {
             Entry = entry;
@@ -564,6 +622,79 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         {
             ReadinessObservationKind = null;
             ReadinessStartedAtSeconds = 0d;
+        }
+
+        public void ArmFallback(
+            TTarget target,
+            Action<NeonLetterMultiplayerSaveEntry, Exception> onEntryError)
+        {
+            if (target is not IDisposable rollback)
+            {
+                return;
+            }
+
+            _ownedFallback = new OwnedFallback(
+                Entry,
+                rollback,
+                onEntryError);
+        }
+
+        public OwnedFallback? TakeOwnedFallback()
+        {
+            OwnedFallback? ownedFallback = _ownedFallback;
+            _ownedFallback = null;
+            return ownedFallback;
+        }
+    }
+
+    private sealed record OwnedFallback(
+        NeonLetterMultiplayerSaveEntry Entry,
+        IDisposable Rollback,
+        Action<NeonLetterMultiplayerSaveEntry, Exception> OnError);
+
+    private static Exception? TryRollbackFallback(
+        OwnedFallback? ownedFallback)
+    {
+        if (ownedFallback == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            ownedFallback.Rollback.Dispose();
+            return null;
+        }
+        catch (Exception exception)
+        {
+            return exception;
+        }
+    }
+
+    private static void RollbackFallback(OwnedFallback? ownedFallback)
+    {
+        Exception? rollbackException = TryRollbackFallback(ownedFallback);
+        ReportRollbackError(ownedFallback, rollbackException);
+    }
+
+    private static void ReportRollbackError(
+        OwnedFallback? ownedFallback,
+        Exception? rollbackException)
+    {
+        if (ownedFallback == null || rollbackException == null)
+        {
+            return;
+        }
+
+        try
+        {
+            ownedFallback.OnError(
+                ownedFallback.Entry,
+                rollbackException);
+        }
+        catch
+        {
+            // Rollback reporting cannot restore the fallback or safely retry it.
         }
     }
 }

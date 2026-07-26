@@ -17,22 +17,23 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
     private static readonly NeonLetterLifecycleCoordinator Lifecycle = new();
     private static readonly Func<
         NeonLetterMultiplayerSaveEntry,
-        BoltEntity,
+        RestoreTarget,
         bool> ApplyRestoredColorCallback = ApplyRestoredColor;
     private static readonly Action<
         NeonLetterMultiplayerSaveEntry,
         Exception> LogRestoreErrorCallback = LogRestoreError;
     private static bool _initialized;
 
-    private readonly NeonLetterMultiplayerRestoreCoordinator<BoltEntity>
+    private readonly NeonLetterMultiplayerRestoreCoordinator<RestoreTarget>
         _restoreCoordinator = new();
+    private readonly Dictionary<int, RestoreTarget> _nativeTargets = new();
     private readonly Dictionary<int, StructureRecipe> _processedRecipes = new();
     private readonly Func<
         NeonLetterMultiplayerSaveEntry,
         bool,
-        BoltEntity,
-        NeonLetterMultiplayerRestoreObservation<BoltEntity>> _observeRestore;
-    private readonly Func<NeonLetterMultiplayerSaveEntry, BoltEntity>
+        RestoreTarget,
+        NeonLetterMultiplayerRestoreObservation<RestoreTarget>> _observeRestore;
+    private readonly Func<NeonLetterMultiplayerSaveEntry, RestoreTarget>
         _startFallback;
     private bool _afterLoadSaveReceived;
     private bool _afterSpawnReceived;
@@ -256,6 +257,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
     private void OnWorldExited()
     {
         _restoreCoordinator.Clear();
+        _nativeTargets.Clear();
         _processedRecipes.Clear();
         _afterLoadSaveReceived = false;
         _afterSpawnReceived = false;
@@ -340,23 +342,23 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         }
     }
 
-    private NeonLetterMultiplayerRestoreObservation<BoltEntity>
+    private NeonLetterMultiplayerRestoreObservation<RestoreTarget>
         ObserveRestore(
             NeonLetterMultiplayerSaveEntry entry,
             bool fallbackSpawnStarted,
-            BoltEntity spawnedEntity)
+            RestoreTarget spawnedTarget)
     {
         StructureRecipe processedRecipe = ResolveProcessedRecipe(entry.RecipeId);
         if (processedRecipe == null)
         {
-            return new NeonLetterMultiplayerRestoreObservation<BoltEntity>(
+            return new NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
                 NeonLetterMultiplayerRestoreObservationKind
                     .ProcessedRecipeUnavailable);
         }
 
         if (fallbackSpawnStarted)
         {
-            return ObserveFallbackTarget(entry, spawnedEntity);
+            return ObserveFallbackTarget(entry, spawnedTarget);
         }
 
         IScrewStructure nativeStructure = null;
@@ -369,7 +371,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         {
             if (nativeStructure == null || nativeStructure.Recipe == null)
             {
-                return new NeonLetterMultiplayerRestoreObservation<BoltEntity>(
+                return new NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
                     NeonLetterMultiplayerRestoreObservationKind
                         .NativeRecipeUnavailable);
             }
@@ -377,7 +379,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             int nativeRecipeId = nativeStructure.Recipe.Id;
             if (nativeRecipeId != entry.RecipeId)
             {
-                return new NeonLetterMultiplayerRestoreObservation<BoltEntity>(
+                return new NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
                     NeonLetterMultiplayerRestoreObservationKind
                         .NativeRecipeMismatch,
                     Target: null,
@@ -395,37 +397,38 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
                 !nativeEntity.isAttached ||
                 nativeEntity.networkId.IsZero)
             {
-                return new NeonLetterMultiplayerRestoreObservation<BoltEntity>(
+                return new NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
                     NeonLetterMultiplayerRestoreObservationKind
                         .NativeTargetUnavailable,
                     ResolvedRecipeId: nativeRecipeId);
             }
 
-            return new NeonLetterMultiplayerRestoreObservation<BoltEntity>(
+            return new NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
                 NeonLetterMultiplayerRestoreObservationKind.NativeTargetReady,
-                nativeEntity,
+                ResolveNativeTarget(nativeEntity),
                 nativeRecipeId);
         }
 
         return processedRecipe._builtPrefab == null
-            ? new NeonLetterMultiplayerRestoreObservation<BoltEntity>(
+            ? new NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
                 NeonLetterMultiplayerRestoreObservationKind
                     .FallbackPrefabUnavailable)
-            : new NeonLetterMultiplayerRestoreObservation<BoltEntity>(
+            : new NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
                 NeonLetterMultiplayerRestoreObservationKind
                     .ReadyToSpawnFallback);
     }
 
-    private static NeonLetterMultiplayerRestoreObservation<BoltEntity>
+    private static NeonLetterMultiplayerRestoreObservation<RestoreTarget>
         ObserveFallbackTarget(
             NeonLetterMultiplayerSaveEntry entry,
-            BoltEntity spawnedEntity)
+            RestoreTarget spawnedTarget)
     {
+        BoltEntity spawnedEntity = spawnedTarget?.Entity;
         if (spawnedEntity == null ||
             !spawnedEntity.isAttached ||
             spawnedEntity.networkId.IsZero)
         {
-            return new NeonLetterMultiplayerRestoreObservation<BoltEntity>(
+            return new NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
                 NeonLetterMultiplayerRestoreObservationKind
                     .FallbackTargetUnavailable);
         }
@@ -434,7 +437,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         if (structure == null ||
             structure.Recipe == null)
         {
-            return new NeonLetterMultiplayerRestoreObservation<BoltEntity>(
+            return new NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
                 NeonLetterMultiplayerRestoreObservationKind
                     .FallbackTargetUnavailable);
         }
@@ -447,13 +450,13 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
                 $"saved recipe {entry.RecipeId}.");
         }
 
-        return new NeonLetterMultiplayerRestoreObservation<BoltEntity>(
+        return new NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
             NeonLetterMultiplayerRestoreObservationKind.FallbackTargetReady,
-            spawnedEntity,
+            spawnedTarget,
             recipeId);
     }
 
-    private BoltEntity StartFallback(
+    private RestoreTarget StartFallback(
         NeonLetterMultiplayerSaveEntry entry)
     {
         StructureRecipe processedRecipe = ResolveProcessedRecipe(entry.RecipeId);
@@ -481,13 +484,14 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
                 $"Bolt failed to instantiate neon recipe {entry.RecipeId}.");
         }
 
-        return spawnedEntity;
+        return new RestoreTarget(spawnedEntity, RollbackFallback);
     }
 
     private static bool ApplyRestoredColor(
         NeonLetterMultiplayerSaveEntry entry,
-        BoltEntity entity)
+        RestoreTarget target)
     {
+        BoltEntity entity = target?.Entity;
         if (entity == null ||
             !entity.isAttached ||
             entity.networkId.IsZero)
@@ -522,6 +526,64 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             entity,
             entry.RecipeId,
             color);
+    }
+
+    private static void RollbackFallback(BoltEntity entity)
+    {
+        BoltNetwork.Destroy(entity);
+    }
+
+    private RestoreTarget ResolveNativeTarget(BoltEntity entity)
+    {
+        int instanceId = entity.GetInstanceID();
+        if (_nativeTargets.TryGetValue(
+                instanceId,
+                out RestoreTarget target) &&
+            target.Matches(entity))
+        {
+            return target;
+        }
+
+        target = new RestoreTarget(entity);
+        _nativeTargets[instanceId] = target;
+        return target;
+    }
+
+    private sealed class RestoreTarget : IDisposable
+    {
+        private Action<BoltEntity> _rollback;
+
+        public RestoreTarget(
+            BoltEntity entity,
+            Action<BoltEntity> rollback = null)
+        {
+            Entity = entity;
+            _rollback = rollback;
+        }
+
+        public BoltEntity Entity { get; }
+
+        public void Dispose()
+        {
+            Action<BoltEntity> rollback =
+                Interlocked.Exchange(ref _rollback, null);
+            if (rollback == null ||
+                Entity == null ||
+                !Entity.isAttached ||
+                Entity.networkId.IsZero)
+            {
+                return;
+            }
+
+            rollback(Entity);
+        }
+
+        public bool Matches(BoltEntity entity)
+        {
+            return Entity != null &&
+                   entity != null &&
+                   Entity.GetInstanceID() == entity.GetInstanceID();
+        }
     }
 
     private void RefreshProcessedRecipes()
