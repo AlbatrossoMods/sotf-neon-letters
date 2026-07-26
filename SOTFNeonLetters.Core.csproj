@@ -17,6 +17,7 @@
         <Compile Include="NeonLetterMultiplayerPolicy.cs" />
         <Compile Include="NeonLetterMultiplayerApplyPolicy.cs" />
         <Compile Include="NeonLetterMultiplayerHandshakePolicy.cs" />
+        <Compile Include="NeonLetterMalformedHostRequestPolicy.cs" />
         <Compile Include="NeonLetterReentrantSnapshotPool.cs" />
         <Compile Include="NeonLetterMultiplayerState.cs" />
         <Compile Include="NeonLetterMultiplayerPersistencePolicy.cs" />

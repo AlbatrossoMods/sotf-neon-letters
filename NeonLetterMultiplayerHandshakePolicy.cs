@@ -206,7 +206,8 @@ internal enum NeonLetterHandshakeStatus : byte
     CatalogMismatch = 1 << 2,
     BundleMismatch = 1 << 3,
     MissingHello = 1 << 4,
-    MalformedHello = 1 << 5
+    MalformedHello = 1 << 5,
+    MalformedRequest = 1 << 6
 }
 
 internal enum NeonLetterPeerState : byte

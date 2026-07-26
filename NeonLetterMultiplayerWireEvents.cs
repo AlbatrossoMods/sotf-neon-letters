@@ -7,6 +7,21 @@ namespace SOTFNeonLetters;
 
 internal static partial class NeonLetterMultiplayerRuntime
 {
+    private static void HandleMalformedHostRequestReadFailure(
+        string eventId,
+        BoltConnection fromConnection,
+        Exception exception)
+    {
+        NeonLetterMalformedHostRequestPolicy.RejectAcceptedPeer(
+            fromConnection,
+            IsAcceptedClient,
+            connection => _hostHandshakes?.Reject(
+                connection,
+                NeonLetterHandshakeStatus.MalformedRequest),
+            QuarantineHostConnection,
+            () => LogReadFailure(eventId, exception));
+    }
+
     private sealed class HandshakeHelloEvent : Packets.NetEvent
     {
         public override string Id => HandshakeHelloEventId;
@@ -88,7 +103,10 @@ internal static partial class NeonLetterMultiplayerRuntime
             }
             catch (Exception exception)
             {
-                LogReadFailure(Id, exception);
+                HandleMalformedHostRequestReadFailure(
+                    Id,
+                    fromConnection,
+                    exception);
             }
         }
 
@@ -183,7 +201,10 @@ internal static partial class NeonLetterMultiplayerRuntime
             }
             catch (Exception exception)
             {
-                LogReadFailure(Id, exception);
+                HandleMalformedHostRequestReadFailure(
+                    Id,
+                    fromConnection,
+                    exception);
             }
         }
 
