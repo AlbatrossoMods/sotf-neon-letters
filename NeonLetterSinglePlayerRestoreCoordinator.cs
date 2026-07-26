@@ -99,11 +99,27 @@ internal sealed class NeonLetterSinglePlayerRestoreCoordinator
     private readonly Dictionary<
         int,
         LinkedListNode<NeonLetterColorSaveEntry>> _pendingBySaveId = new();
+    private readonly NeonLetterMonotonicSequence _epochs;
     private LinkedListNode<NeonLetterColorSaveEntry>? _nextPending;
     private double _startedAtSeconds;
     private long _epoch;
     private ulong _readinessToken;
     private int _readinessWaveAttemptsRemaining;
+    private bool _isAdvancing;
+    private ulong? _deferredReadinessToken;
+    private bool _canAdvance = true;
+
+    internal NeonLetterSinglePlayerRestoreCoordinator()
+        : this(new NeonLetterMonotonicSequence())
+    {
+    }
+
+    internal NeonLetterSinglePlayerRestoreCoordinator(
+        NeonLetterMonotonicSequence epochs)
+    {
+        ArgumentNullException.ThrowIfNull(epochs);
+        _epochs = epochs;
+    }
 
     internal int PendingCount => _pending.Count;
 
@@ -158,7 +174,8 @@ internal sealed class NeonLetterSinglePlayerRestoreCoordinator
     internal bool HasWorkForToken(long epoch, ulong readinessToken)
     {
         ValidateReadinessToken(readinessToken);
-        return epoch == _epoch &&
+        return _canAdvance &&
+               epoch == _epoch &&
                _pending.Count > 0 &&
                (readinessToken != _readinessToken ||
                 _readinessWaveAttemptsRemaining > 0);
@@ -174,7 +191,32 @@ internal sealed class NeonLetterSinglePlayerRestoreCoordinator
         ValidateReadinessToken(readinessToken);
         ArgumentNullException.ThrowIfNull(attempt);
 
-        if (epoch != _epoch || _pending.Count == 0)
+        if (!TryBeginAdvance(readinessToken))
+        {
+            return 0;
+        }
+
+        try
+        {
+            return AdvanceForReadinessTokenCore(
+                epoch,
+                ResolveDeferredReadinessToken(readinessToken),
+                attempt);
+        }
+        finally
+        {
+            _isAdvancing = false;
+        }
+    }
+
+    private int AdvanceForReadinessTokenCore(
+        long epoch,
+        ulong readinessToken,
+        Func<
+            NeonLetterColorSaveEntry,
+            NeonLetterSinglePlayerRestoreAttemptResult> attempt)
+    {
+        if (!_canAdvance || epoch != _epoch || _pending.Count == 0)
         {
             return 0;
         }
@@ -252,7 +294,32 @@ internal sealed class NeonLetterSinglePlayerRestoreCoordinator
         ValidateNowSeconds(nowSeconds);
         ArgumentNullException.ThrowIfNull(attempt);
 
-        if (epoch != _epoch || _pending.Count == 0)
+        if (!TryBeginAdvance(readinessToken: null))
+        {
+            return 0;
+        }
+
+        try
+        {
+            return AdvanceCompatibilityCore(
+                epoch,
+                nowSeconds,
+                attempt);
+        }
+        finally
+        {
+            _isAdvancing = false;
+        }
+    }
+
+    private int AdvanceCompatibilityCore(
+        long epoch,
+        double nowSeconds,
+        Func<
+            NeonLetterColorSaveEntry,
+            NeonLetterSinglePlayerRestoreAttemptResult> attempt)
+    {
+        if (!_canAdvance || epoch != _epoch || _pending.Count == 0)
         {
             return 0;
         }
@@ -311,13 +378,48 @@ internal sealed class NeonLetterSinglePlayerRestoreCoordinator
         return appliedCount;
     }
 
-    private void BeginNextEpoch()
+    private bool TryBeginAdvance(ulong? readinessToken)
     {
-        unchecked
+        if (_isAdvancing)
         {
-            _epoch++;
+            if (readinessToken.HasValue &&
+                (!_deferredReadinessToken.HasValue ||
+                 readinessToken.Value > _deferredReadinessToken.Value))
+            {
+                _deferredReadinessToken = readinessToken;
+            }
+
+            return false;
         }
 
+        _isAdvancing = true;
+        return true;
+    }
+
+    private ulong ResolveDeferredReadinessToken(ulong readinessToken)
+    {
+        if (_deferredReadinessToken.HasValue &&
+            _deferredReadinessToken.Value > readinessToken)
+        {
+            readinessToken = _deferredReadinessToken.Value;
+        }
+
+        _deferredReadinessToken = null;
+        return readinessToken;
+    }
+
+    private void BeginNextEpoch()
+    {
+        _canAdvance = false;
+        if (_epochs.Current >= (ulong)long.MaxValue)
+        {
+            ClearPending();
+            throw new InvalidOperationException(
+                "The single-player restore epoch space is exhausted.");
+        }
+
+        _epoch = checked((long)_epochs.Advance());
+        _canAdvance = true;
         ClearPending();
     }
 
@@ -328,6 +430,7 @@ internal sealed class NeonLetterSinglePlayerRestoreCoordinator
         _nextPending = null;
         _readinessToken = 0;
         _readinessWaveAttemptsRemaining = 0;
+        _deferredReadinessToken = null;
     }
 
     private void RemovePending(

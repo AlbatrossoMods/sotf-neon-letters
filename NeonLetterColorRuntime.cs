@@ -20,6 +20,8 @@ public static class NeonLetterColorRuntime
         RestoreLifecycle = new();
     private static readonly NeonLetterRestoreReadinessScheduler<
         SinglePlayerRestoreProgress> RestoreReadiness = new();
+    private static readonly NeonLetterMonotonicSequence
+        RestoreSignals = new();
     private static readonly Func<
         NeonLetterColorSaveEntry,
         NeonLetterSinglePlayerRestoreAttemptResult>
@@ -33,7 +35,6 @@ public static class NeonLetterColorRuntime
             IsStructureRootAlive,
             CreateEmissionBinding);
     private static bool _initialized;
-    private static long _restoreSignalGeneration;
     private static long _restoreUpdateTick;
 
     public static void Initialize()
@@ -337,7 +338,7 @@ public static class NeonLetterColorRuntime
                 out ScrewStructureManager manager) &&
             manager._structures != null;
         return new SinglePlayerRestoreProgress(
-            _restoreSignalGeneration,
+            RestoreSignals.Current,
             isSinglePlayer,
             managerAvailable,
             managerAvailable && manager._isLoadingSave,
@@ -357,21 +358,17 @@ public static class NeonLetterColorRuntime
 
     private static void SignalRestoreProgress()
     {
-        unchecked
-        {
-            _restoreSignalGeneration++;
-        }
+        RestoreSignals.Advance();
     }
 
     private static void ResetRestoreReadiness()
     {
         RestoreReadiness.Reset();
-        _restoreSignalGeneration = 0;
         _restoreUpdateTick = 0;
     }
 
     private readonly record struct SinglePlayerRestoreProgress(
-        long SignalGeneration,
+        ulong SignalGeneration,
         bool IsSinglePlayer,
         bool ManagerAvailable,
         bool IsLoadingSave,

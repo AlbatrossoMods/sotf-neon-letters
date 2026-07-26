@@ -86,6 +86,106 @@ public sealed class RestoreReadinessSchedulingTests
     }
 
     [Fact]
+    public void SaturatedUpdateTickDoesNotRepeatSafetyProbe()
+    {
+        var scheduler = new NeonLetterRestoreReadinessScheduler<int>();
+        scheduler.TryGetDueToken(
+            observedProgress: 1,
+            updateTick: long.MaxValue,
+            waveActive: false,
+            out ulong firstToken);
+
+        bool firstRepeatedProbe = scheduler.TryGetDueToken(
+            observedProgress: 1,
+            updateTick: long.MaxValue,
+            waveActive: false,
+            out ulong repeatedToken);
+        bool secondRepeatedProbe = scheduler.TryGetDueToken(
+            observedProgress: 1,
+            updateTick: long.MaxValue,
+            waveActive: false,
+            out _);
+
+        Assert.Equal(
+            (false, false, true),
+            (
+                firstRepeatedProbe,
+                secondRepeatedProbe,
+                repeatedToken == firstToken));
+    }
+
+    [Fact]
+    public void MonotonicSequenceFailsClosedBeforeWrappingToZero()
+    {
+        var sequence = new NeonLetterMonotonicSequence(
+            initialValue: ulong.MaxValue - 1);
+
+        ulong lastValue = sequence.Advance();
+        InvalidOperationException exception =
+            Assert.Throws<InvalidOperationException>(
+                () =>
+                {
+                    sequence.Advance();
+                });
+
+        Assert.Equal(
+            (ulong.MaxValue, ulong.MaxValue, true),
+            (
+                lastValue,
+                sequence.Current,
+                exception.Message.Contains(
+                    "exhausted",
+                    StringComparison.OrdinalIgnoreCase)));
+    }
+
+    [Fact]
+    public void ReadinessTokensFailClosedBeforeReuse()
+    {
+        var scheduler = new NeonLetterRestoreReadinessScheduler<int>(
+            new NeonLetterMonotonicSequence(ulong.MaxValue - 1));
+        scheduler.TryGetDueToken(
+            observedProgress: 1,
+            updateTick: 0,
+            waveActive: false,
+            out ulong lastToken);
+
+        Assert.Throws<InvalidOperationException>(
+            () => scheduler.TryGetDueToken(
+                observedProgress: 2,
+                updateTick: 1,
+                waveActive: false,
+                out _));
+
+        Assert.Equal(ulong.MaxValue, lastToken);
+    }
+
+    [Fact]
+    public void ExhaustedSinglePlayerEpochCancelsOldRestoreAndFailsClosed()
+    {
+        var coordinator = new NeonLetterSinglePlayerRestoreCoordinator(
+            new NeonLetterMonotonicSequence(
+                initialValue: (ulong)long.MaxValue - 1));
+        long epoch = coordinator.Stage(
+            CreateSinglePlayerEnvelope(1),
+            nowSeconds: 0d);
+        int attemptCount = 0;
+
+        Assert.Throws<InvalidOperationException>(coordinator.Cancel);
+        coordinator.Advance(
+            epoch,
+            readinessToken: 1,
+            _ =>
+            {
+                attemptCount++;
+                return NeonLetterSinglePlayerRestoreAttemptResult.Applied;
+            });
+
+        Assert.Equal(
+            (0, 0),
+            (attemptCount, coordinator.PendingCount));
+    }
+
+    [Fact]
     public void ParkedSinglePlayerEntryUsesBoundedAttemptsAcrossOneHundredThousandUpdates()
     {
         var scheduler = new NeonLetterRestoreReadinessScheduler<int>();
@@ -238,6 +338,56 @@ public sealed class RestoreReadinessSchedulingTests
     }
 
     [Fact]
+    public void ReentrantSinglePlayerTokenWaitsForTheNextUpdate()
+    {
+        var coordinator = new NeonLetterSinglePlayerRestoreCoordinator();
+        long epoch = coordinator.Stage(
+            CreateSinglePlayerEnvelope(
+                Enumerable.Range(1, 40).ToArray()),
+            nowSeconds: 0d);
+        var attemptedSaveIds = new List<int>();
+        bool nestedAdvanceRequested = false;
+
+        coordinator.Advance(
+            epoch,
+            readinessToken: 1,
+            entry =>
+            {
+                attemptedSaveIds.Add(entry.SaveId);
+                if (!nestedAdvanceRequested)
+                {
+                    nestedAdvanceRequested = true;
+                    coordinator.Advance(
+                        epoch,
+                        readinessToken: 2,
+                        nestedEntry =>
+                        {
+                            attemptedSaveIds.Add(nestedEntry.SaveId);
+                            return NeonLetterSinglePlayerRestoreAttemptResult
+                                .TargetUnavailable;
+                        });
+                }
+
+                return NeonLetterSinglePlayerRestoreAttemptResult
+                    .TargetUnavailable;
+            });
+
+        Assert.Equal(Enumerable.Range(1, 16), attemptedSaveIds);
+
+        coordinator.Advance(
+            epoch,
+            readinessToken: 2,
+            entry =>
+            {
+                attemptedSaveIds.Add(entry.SaveId);
+                return NeonLetterSinglePlayerRestoreAttemptResult
+                    .TargetUnavailable;
+            });
+
+        Assert.Equal(Enumerable.Range(1, 32), attemptedSaveIds);
+    }
+
+    [Fact]
     public void SinglePlayerRoleLossCancelsAnActiveReadinessWave()
     {
         var lifecycle = new NeonLetterSinglePlayerRestoreLifecycle();
@@ -383,6 +533,38 @@ public sealed class RestoreReadinessSchedulingTests
     }
 
     [Fact]
+    public void MultiplayerCoordinatorClampsCallerBudgetsToGlobalCaps()
+    {
+        NeonLetterMultiplayerRestoreCoordinator<string> coordinator =
+            CreateMultiplayerCoordinator(
+                count: 40,
+                includeNativeSaveIds: false);
+        int observeCount = 0;
+        int fallbackStartCount = 0;
+
+        coordinator.Advance(
+            nowSeconds: 0d,
+            maxItems: 100,
+            maxFallbackSpawns: 100,
+            observe: (_, _, _) =>
+            {
+                observeCount++;
+                return new NeonLetterMultiplayerRestoreObservation<string>(
+                    NeonLetterMultiplayerRestoreObservationKind
+                        .ReadyToSpawnFallback);
+            },
+            startFallback: _ =>
+            {
+                fallbackStartCount++;
+                return "fallback";
+            },
+            applyRestored: (_, _) => true,
+            onEntryError: (_, exception) => throw exception);
+
+        Assert.Equal((16, 2), (observeCount, fallbackStartCount));
+    }
+
+    [Fact]
     public void MultiplayerRoleLossCancelsAnActiveReadinessWave()
     {
         NeonLetterMultiplayerRestoreCoordinator<string> coordinator =
@@ -409,6 +591,179 @@ public sealed class RestoreReadinessSchedulingTests
         Assert.Equal(
             (1, NeonLetterMultiplayerRestoreRole.Client, 0),
             (attemptCount, coordinator.Role, coordinator.PendingCount));
+    }
+
+    [Fact]
+    public void ReentrantMultiplayerTokenWaitsForTheNextUpdate()
+    {
+        NeonLetterMultiplayerRestoreCoordinator<string> coordinator =
+            CreateMultiplayerCoordinator(40);
+        var observedSaveIds = new List<int>();
+        bool nestedAdvanceRequested = false;
+
+        coordinator.AdvanceForReadinessToken(
+            readinessToken: 1,
+            maxItems: 16,
+            maxFallbackSpawns: 2,
+            observe: (entry, _, _) =>
+            {
+                observedSaveIds.Add(entry.NativeSaveId);
+                if (!nestedAdvanceRequested)
+                {
+                    nestedAdvanceRequested = true;
+                    coordinator.AdvanceForReadinessToken(
+                        readinessToken: 2,
+                        maxItems: 16,
+                        maxFallbackSpawns: 2,
+                        observe: (nestedEntry, _, _) =>
+                        {
+                            observedSaveIds.Add(
+                                nestedEntry.NativeSaveId);
+                            return new
+                                NeonLetterMultiplayerRestoreObservation<string>(
+                                    NeonLetterMultiplayerRestoreObservationKind
+                                        .ProcessedRecipeUnavailable);
+                        },
+                        startFallback: _ => "fallback",
+                        applyRestored: (_, _) => true,
+                        onEntryError: (_, exception) => throw exception);
+                }
+
+                return new NeonLetterMultiplayerRestoreObservation<string>(
+                    NeonLetterMultiplayerRestoreObservationKind
+                        .ProcessedRecipeUnavailable);
+            },
+            startFallback: _ => "fallback",
+            applyRestored: (_, _) => true,
+            onEntryError: (_, exception) => throw exception);
+
+        Assert.Equal(Enumerable.Range(1, 16), observedSaveIds);
+
+        coordinator.AdvanceForReadinessToken(
+            readinessToken: 2,
+            maxItems: 16,
+            maxFallbackSpawns: 2,
+            observe: (entry, _, _) =>
+            {
+                observedSaveIds.Add(entry.NativeSaveId);
+                return new NeonLetterMultiplayerRestoreObservation<string>(
+                    NeonLetterMultiplayerRestoreObservationKind
+                        .ProcessedRecipeUnavailable);
+            },
+            startFallback: _ => "fallback",
+            applyRestored: (_, _) => true,
+            onEntryError: (_, exception) => throw exception);
+
+        Assert.Equal(Enumerable.Range(1, 32), observedSaveIds);
+    }
+
+    [Fact]
+    public void ReentrantMultiplayerApplyWaitsForTheNextUpdate()
+    {
+        NeonLetterMultiplayerRestoreCoordinator<string> coordinator =
+            CreateMultiplayerCoordinator(40);
+        var appliedSaveIds = new List<int>();
+        int nestedObserveCount = 0;
+        bool nestedAdvanceRequested = false;
+
+        coordinator.AdvanceForReadinessToken(
+            readinessToken: 1,
+            maxItems: 16,
+            maxFallbackSpawns: 2,
+            observe: (entry, _, _) =>
+                new NeonLetterMultiplayerRestoreObservation<string>(
+                    NeonLetterMultiplayerRestoreObservationKind
+                        .NativeTargetReady,
+                    Target: $"native-{entry.NativeSaveId}",
+                    ResolvedRecipeId: entry.RecipeId),
+            startFallback: _ => "fallback",
+            applyRestored: (entry, _) =>
+            {
+                appliedSaveIds.Add(entry.NativeSaveId);
+                if (!nestedAdvanceRequested)
+                {
+                    nestedAdvanceRequested = true;
+                    coordinator.AdvanceForReadinessToken(
+                        readinessToken: 2,
+                        maxItems: 16,
+                        maxFallbackSpawns: 2,
+                        observe: (_, _, _) =>
+                        {
+                            nestedObserveCount++;
+                            return new
+                                NeonLetterMultiplayerRestoreObservation<string>(
+                                    NeonLetterMultiplayerRestoreObservationKind
+                                        .ProcessedRecipeUnavailable);
+                        },
+                        startFallback: _ => "fallback",
+                        applyRestored: (_, _) => true,
+                        onEntryError: (_, exception) => throw exception);
+                }
+
+                return true;
+            },
+            onEntryError: (_, exception) => throw exception);
+
+        Assert.Equal(
+            (string.Join(",", Enumerable.Range(1, 16)), 0),
+            (string.Join(",", appliedSaveIds), nestedObserveCount));
+    }
+
+    [Fact]
+    public void ReentrantMultiplayerFallbackKeepsTheGlobalSpawnBudget()
+    {
+        NeonLetterMultiplayerRestoreCoordinator<string> coordinator =
+            CreateMultiplayerCoordinator(
+                count: 40,
+                includeNativeSaveIds: false);
+        int fallbackStartCount = 0;
+        bool nestedAdvanceRequested = false;
+
+        void Advance(ulong token)
+        {
+            coordinator.AdvanceForReadinessToken(
+                readinessToken: token,
+                maxItems: 16,
+                maxFallbackSpawns: 2,
+                observe: (_, _, _) =>
+                    new NeonLetterMultiplayerRestoreObservation<string>(
+                        NeonLetterMultiplayerRestoreObservationKind
+                            .ReadyToSpawnFallback),
+                startFallback: _ =>
+                {
+                    fallbackStartCount++;
+                    if (!nestedAdvanceRequested)
+                    {
+                        nestedAdvanceRequested = true;
+                        coordinator.AdvanceForReadinessToken(
+                            readinessToken: 2,
+                            maxItems: 16,
+                            maxFallbackSpawns: 2,
+                            observe: (_, _, _) =>
+                                new
+                                    NeonLetterMultiplayerRestoreObservation<string>(
+                                        NeonLetterMultiplayerRestoreObservationKind
+                                            .ReadyToSpawnFallback),
+                            startFallback: _ =>
+                            {
+                                fallbackStartCount++;
+                                return "nested-fallback";
+                            },
+                            applyRestored: (_, _) => true,
+                            onEntryError: (_, exception) => throw exception);
+                    }
+
+                    return "fallback";
+                },
+                applyRestored: (_, _) => true,
+                onEntryError: (_, exception) => throw exception);
+        }
+
+        Advance(token: 1);
+        Assert.Equal(2, fallbackStartCount);
+
+        Advance(token: 2);
+        Assert.Equal(4, fallbackStartCount);
     }
 
     [Fact]

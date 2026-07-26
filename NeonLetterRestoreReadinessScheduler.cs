@@ -16,7 +16,19 @@ internal sealed class NeonLetterRestoreReadinessScheduler<TProgress>
     private long _nextSafetyProbeTick;
     private int _safetyProbeIntervalUpdates =
         InitialSafetyProbeIntervalUpdates;
-    private ulong _nextToken = 1;
+    private readonly NeonLetterMonotonicSequence _tokens;
+
+    internal NeonLetterRestoreReadinessScheduler()
+        : this(new NeonLetterMonotonicSequence())
+    {
+    }
+
+    internal NeonLetterRestoreReadinessScheduler(
+        NeonLetterMonotonicSequence tokens)
+    {
+        ArgumentNullException.ThrowIfNull(tokens);
+        _tokens = tokens;
+    }
 
     internal ulong CurrentToken { get; private set; }
 
@@ -31,6 +43,7 @@ internal sealed class NeonLetterRestoreReadinessScheduler<TProgress>
             throw new ArgumentOutOfRangeException(nameof(updateTick));
         }
 
+        bool repeatedUpdateTick = updateTick == _lastUpdateTick;
         _lastUpdateTick = updateTick;
         if (!_hasObservedProgress ||
             !_comparer.Equals(_observedProgress, observedProgress))
@@ -43,6 +56,12 @@ internal sealed class NeonLetterRestoreReadinessScheduler<TProgress>
             ScheduleSafetyProbe(updateTick);
             token = CurrentToken;
             return true;
+        }
+
+        if (repeatedUpdateTick)
+        {
+            token = CurrentToken;
+            return false;
         }
 
         if (waveActive)
@@ -84,14 +103,7 @@ internal sealed class NeonLetterRestoreReadinessScheduler<TProgress>
 
     private void IssueToken()
     {
-        if (_nextToken == 0)
-        {
-            throw new InvalidOperationException(
-                "The restore readiness token space is exhausted.");
-        }
-
-        CurrentToken = _nextToken;
-        _nextToken = unchecked(_nextToken + 1);
+        CurrentToken = _tokens.Advance();
     }
 
     private void ScheduleSafetyProbe(long updateTick)

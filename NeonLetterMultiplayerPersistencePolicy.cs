@@ -134,13 +134,66 @@ public readonly record struct NeonLetterMultiplayerRestoreObservation<TTarget>(
     int? ResolvedRecipeId = null)
     where TTarget : class;
 
+internal sealed class NeonLetterMultiplayerRestoreLoadQueue
+{
+    private NeonLetterMultiplayerSaveEnvelope? _pending;
+    private bool _accepting = true;
+
+    internal bool HasPending => _pending != null;
+
+    internal bool Enqueue(NeonLetterMultiplayerSaveEnvelope? envelope)
+    {
+        if (!_accepting)
+        {
+            return false;
+        }
+
+        _pending = NeonLetterMultiplayerPersistencePolicy.Sanitize(envelope);
+        return true;
+    }
+
+    internal bool TryDequeue(
+        out NeonLetterMultiplayerSaveEnvelope envelope)
+    {
+        if (_pending == null)
+        {
+            envelope = new NeonLetterMultiplayerSaveEnvelope();
+            return false;
+        }
+
+        envelope = _pending;
+        _pending = null;
+        return true;
+    }
+
+    internal void Clear()
+    {
+        _pending = null;
+    }
+
+    internal void SuspendAndClear()
+    {
+        _accepting = false;
+        _pending = null;
+    }
+
+    internal void Resume()
+    {
+        _accepting = true;
+    }
+}
+
 public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
     where TTarget : class
 {
+    internal const int MaxItemsPerUpdate = 16;
+    internal const int MaxFallbackSpawnsPerUpdate = 2;
+
     private readonly LinkedList<PendingRestore> _pending = new();
     private readonly NeonLetterReentrantSnapshotPool<
         LinkedListNode<PendingRestore>> _snapshotPool =
             new();
+    private readonly NeonLetterMonotonicSequence _epochs;
     private NeonLetterMultiplayerSaveEnvelope _stagedEnvelope = new();
     private LinkedListNode<PendingRestore>? _nextPending;
     private NeonLetterMultiplayerRestoreRole _role;
@@ -148,11 +201,28 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
     private int _startedFallbackCount;
     private ulong _readinessToken;
     private int _readinessWaveAttemptsRemaining;
+    private bool _isAdvancing;
+    private ulong? _deferredReadinessToken;
+    private bool _canAdvance = true;
+    private ulong _lastAbandonmentEpoch;
+
+    public NeonLetterMultiplayerRestoreCoordinator()
+        : this(new NeonLetterMonotonicSequence())
+    {
+    }
+
+    internal NeonLetterMultiplayerRestoreCoordinator(
+        NeonLetterMonotonicSequence epochs)
+    {
+        ArgumentNullException.ThrowIfNull(epochs);
+        _epochs = epochs;
+    }
 
     public NeonLetterMultiplayerRestoreRole Role => _role;
     public bool HasStagedEnvelope => _hasStagedEnvelope;
     public int PendingCount => _pending.Count;
     public int StartedFallbackCount => _startedFallbackCount;
+    internal ulong RestoreEpoch => _epochs.Current;
 
     /// <summary>
     /// Returns whether the current host restore has entries left for a token.
@@ -160,7 +230,8 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
     public bool HasWorkForToken(ulong readinessToken)
     {
         ValidateReadinessToken(readinessToken);
-        return _role == NeonLetterMultiplayerRestoreRole.Host &&
+        return _canAdvance &&
+               _role == NeonLetterMultiplayerRestoreRole.Host &&
                _pending.Count > 0 &&
                (readinessToken != _readinessToken ||
                 _readinessWaveAttemptsRemaining > 0);
@@ -170,6 +241,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
     {
         NeonLetterMultiplayerSaveEnvelope stagedEnvelope =
             NeonLetterMultiplayerPersistencePolicy.Sanitize(envelope);
+        BeginNextRestoreEpoch(abandonWithoutMutation: false);
         List<OwnedFallback>? ownedFallbacks = DetachLoadedState();
         _stagedEnvelope = stagedEnvelope;
         _hasStagedEnvelope = true;
@@ -180,15 +252,28 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
 
     public void SetRole(NeonLetterMultiplayerRestoreRole role)
     {
+        if (_role != role)
+        {
+            BeginNextRestoreEpoch(abandonWithoutMutation: false);
+        }
+
         _role = role;
         RollbackFallbacks(ApplyRoleToLoadedState());
     }
 
     public void Clear()
     {
+        BeginNextRestoreEpoch(abandonWithoutMutation: false);
         List<OwnedFallback>? ownedFallbacks = DetachLoadedState();
         _role = NeonLetterMultiplayerRestoreRole.Unknown;
         RollbackFallbacks(ownedFallbacks);
+    }
+
+    internal void AbandonWithoutWorldMutation()
+    {
+        BeginNextRestoreEpoch(abandonWithoutMutation: true);
+        DetachLoadedState();
+        _role = NeonLetterMultiplayerRestoreRole.Unknown;
     }
 
     public void Advance(
@@ -230,14 +315,26 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         ArgumentNullException.ThrowIfNull(applyRestored);
         ArgumentNullException.ThrowIfNull(onEntryError);
 
-        AdvanceCore(
-            readinessToken: null,
-            maxItems,
-            maxFallbackSpawns,
-            observe,
-            startFallback,
-            applyRestored,
-            onEntryError);
+        if (!TryBeginAdvance(readinessToken: null))
+        {
+            return;
+        }
+
+        try
+        {
+            AdvanceCore(
+                readinessToken: null,
+                maxItems,
+                maxFallbackSpawns,
+                observe,
+                startFallback,
+                applyRestored,
+                onEntryError);
+        }
+        finally
+        {
+            _isAdvancing = false;
+        }
     }
 
     /// <summary>
@@ -261,14 +358,56 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         ArgumentNullException.ThrowIfNull(applyRestored);
         ArgumentNullException.ThrowIfNull(onEntryError);
 
-        AdvanceCore(
-            readinessToken,
-            maxItems,
-            maxFallbackSpawns,
-            observe,
-            startFallback,
-            applyRestored,
-            onEntryError);
+        if (!TryBeginAdvance(readinessToken))
+        {
+            return;
+        }
+
+        try
+        {
+            AdvanceCore(
+                ResolveDeferredReadinessToken(readinessToken),
+                maxItems,
+                maxFallbackSpawns,
+                observe,
+                startFallback,
+                applyRestored,
+                onEntryError);
+        }
+        finally
+        {
+            _isAdvancing = false;
+        }
+    }
+
+    private bool TryBeginAdvance(ulong? readinessToken)
+    {
+        if (_isAdvancing)
+        {
+            if (readinessToken.HasValue &&
+                (!_deferredReadinessToken.HasValue ||
+                 readinessToken.Value > _deferredReadinessToken.Value))
+            {
+                _deferredReadinessToken = readinessToken;
+            }
+
+            return false;
+        }
+
+        _isAdvancing = true;
+        return true;
+    }
+
+    private ulong ResolveDeferredReadinessToken(ulong readinessToken)
+    {
+        if (_deferredReadinessToken.HasValue &&
+            _deferredReadinessToken.Value > readinessToken)
+        {
+            readinessToken = _deferredReadinessToken.Value;
+        }
+
+        _deferredReadinessToken = null;
+        return readinessToken;
     }
 
     private void AdvanceCore(
@@ -281,7 +420,12 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored,
         Action<NeonLetterMultiplayerSaveEntry, Exception> onEntryError)
     {
-        if (_role != NeonLetterMultiplayerRestoreRole.Host ||
+        maxItems = Math.Min(maxItems, MaxItemsPerUpdate);
+        maxFallbackSpawns = Math.Min(
+            maxFallbackSpawns,
+            MaxFallbackSpawnsPerUpdate);
+        if (!_canAdvance ||
+            _role != NeonLetterMultiplayerRestoreRole.Host ||
             _pending.Count == 0 ||
             maxItems == 0)
         {
@@ -303,6 +447,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
             }
         }
 
+        ulong advanceEpoch = _epochs.Current;
         LinkedListNode<PendingRestore>? node =
             _nextPending?.List == _pending
                 ? _nextPending
@@ -330,6 +475,12 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
             _nextPending = node;
             foreach (LinkedListNode<PendingRestore> currentNode in snapshot)
             {
+                PendingRestore pending = currentNode.Value;
+                if (!IsCurrent(currentNode, pending, advanceEpoch))
+                {
+                    break;
+                }
+
                 if (readinessToken.HasValue)
                 {
                     if (readinessToken.Value != _readinessToken)
@@ -340,7 +491,6 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                     _readinessWaveAttemptsRemaining--;
                 }
 
-                PendingRestore pending = currentNode.Value;
                 try
                 {
                     NeonLetterMultiplayerRestoreObservation<TTarget>
@@ -348,10 +498,16 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                             pending.Entry,
                             pending.State.FallbackSpawnStarted,
                             pending.SpawnedTarget);
+                    if (!IsCurrent(currentNode, pending, advanceEpoch))
+                    {
+                        break;
+                    }
+
                     ProcessObservation(
                         currentNode,
                         pending,
                         observation,
+                        advanceEpoch,
                         maxFallbackSpawns,
                         ref fallbackSpawns,
                         observe,
@@ -361,6 +517,15 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                 }
                 catch (Exception exception)
                 {
+                    if (!IsCurrent(currentNode, pending, advanceEpoch))
+                    {
+                        HandleStaleFallback(
+                            currentNode,
+                            pending,
+                            advanceEpoch);
+                        break;
+                    }
+
                     OwnedFallback? ownedFallback = RemovePending(currentNode);
                     Exception? rollbackException =
                         TryRollbackFallback(ownedFallback);
@@ -387,6 +552,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         LinkedListNode<PendingRestore> node,
         PendingRestore pending,
         NeonLetterMultiplayerRestoreObservation<TTarget> observation,
+        ulong advanceEpoch,
         int maxFallbackSpawns,
         ref int fallbackSpawns,
         Func<NeonLetterMultiplayerSaveEntry, bool, TTarget?,
@@ -395,6 +561,11 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored,
         Action<NeonLetterMultiplayerSaveEntry, Exception> onEntryError)
     {
+        if (!IsCurrent(node, pending, advanceEpoch))
+        {
+            return;
+        }
+
         switch (observation.Kind)
         {
             case NeonLetterMultiplayerRestoreObservationKind.ProcessedRecipeUnavailable:
@@ -426,6 +597,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                     node,
                     pending,
                     observation,
+                    advanceEpoch,
                     applyRestored);
                 break;
 
@@ -442,6 +614,11 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                             pending.Entry,
                             pending.State.FallbackSpawnStarted,
                             pending.SpawnedTarget);
+                    if (!IsCurrent(node, pending, advanceEpoch))
+                    {
+                        break;
+                    }
+
                     if (finalObservation.Kind !=
                         NeonLetterMultiplayerRestoreObservationKind
                             .ReadyToSpawnFallback)
@@ -450,6 +627,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                             node,
                             pending,
                             finalObservation,
+                            advanceEpoch,
                             maxFallbackSpawns,
                             ref fallbackSpawns,
                             observe,
@@ -476,9 +654,12 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                     pending.ArmFallback(
                         pending.SpawnedTarget,
                         onEntryError);
-                    if (node.List != _pending)
+                    if (!IsCurrent(node, pending, advanceEpoch))
                     {
-                        RollbackFallback(pending.TakeOwnedFallback());
+                        HandleStaleFallback(
+                            node,
+                            pending,
+                            advanceEpoch);
                     }
                 }
                 break;
@@ -494,6 +675,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         LinkedListNode<PendingRestore> node,
         PendingRestore pending,
         NeonLetterMultiplayerRestoreObservation<TTarget> observation,
+        ulong advanceEpoch,
         Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored)
     {
         if (observation.Target == null)
@@ -502,7 +684,13 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                 $"Restore observation {observation.Kind} requires a target.");
         }
 
-        if (applyRestored(pending.Entry, observation.Target))
+        bool applied = applyRestored(pending.Entry, observation.Target);
+        if (!IsCurrent(node, pending, advanceEpoch))
+        {
+            return;
+        }
+
+        if (applied)
         {
             RemovePending(node);
         }
@@ -532,6 +720,61 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         }
 
         return node.Value.TakeOwnedFallback();
+    }
+
+    private bool IsCurrent(
+        LinkedListNode<PendingRestore> node,
+        PendingRestore pending,
+        ulong epoch)
+    {
+        return _canAdvance &&
+               _role == NeonLetterMultiplayerRestoreRole.Host &&
+               epoch == _epochs.Current &&
+               node.List == _pending &&
+               ReferenceEquals(node.Value, pending);
+    }
+
+    private void HandleStaleFallback(
+        LinkedListNode<PendingRestore> node,
+        PendingRestore pending,
+        ulong advanceEpoch)
+    {
+        if (_lastAbandonmentEpoch > advanceEpoch)
+        {
+            pending.TakeOwnedFallback();
+            return;
+        }
+
+        if (node.List != _pending)
+        {
+            RollbackFallback(pending.TakeOwnedFallback());
+        }
+    }
+
+    private void BeginNextRestoreEpoch(bool abandonWithoutMutation)
+    {
+        _canAdvance = false;
+        try
+        {
+            ulong epoch = _epochs.Advance();
+            if (abandonWithoutMutation)
+            {
+                _lastAbandonmentEpoch = epoch;
+            }
+
+            _canAdvance = true;
+        }
+        catch
+        {
+            List<OwnedFallback>? ownedFallbacks = DetachLoadedState();
+            _role = NeonLetterMultiplayerRestoreRole.Unknown;
+            if (!abandonWithoutMutation)
+            {
+                RollbackFallbacks(ownedFallbacks);
+            }
+
+            throw;
+        }
     }
 
     private static void ValidateNowSeconds(double nowSeconds)
@@ -636,6 +879,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         _startedFallbackCount = 0;
         _readinessToken = 0;
         _readinessWaveAttemptsRemaining = 0;
+        _deferredReadinessToken = null;
 
         return ownedFallbacks;
     }

@@ -181,7 +181,7 @@ public sealed class RestoreMutationBehaviorTests
     }
 
     [Fact]
-    public void NestedAdvanceRemovingCurrentEntryStopsTheOuterAttempt()
+    public void NestedAdvanceWaitsUntilTheOuterAttemptReturns()
     {
         var coordinator = new NeonLetterSinglePlayerRestoreCoordinator();
         long epoch = coordinator.Stage(
@@ -203,7 +203,7 @@ public sealed class RestoreMutationBehaviorTests
                 }));
 
         Assert.Equal(
-            (null, 1, 0),
+            (null, 0, 0),
             (
                 outerError?.GetType(),
                 nestedAppliedCount,

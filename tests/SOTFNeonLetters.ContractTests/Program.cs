@@ -3900,6 +3900,48 @@ void CheckColorRuntimeSafetyContract()
             "readinessToken:",
             StringComparison.Ordinal),
         "multiplayer runtime advances token-scoped restore waves");
+    CheckEqual(
+        true,
+        multiplayerSaveRuntimeSource.Contains(
+            "_queuedLoads.Enqueue(obj)",
+            StringComparison.Ordinal),
+        "multiplayer Load only queues its sanitized restore payload");
+    CheckEqual(
+        false,
+        multiplayerSaveRuntimeSource.Contains(
+            "_restoreCoordinator.Stage(obj)",
+            StringComparison.Ordinal),
+        "multiplayer Load performs no coordinator or world mutation");
+    CheckEqual(
+        true,
+        multiplayerSaveRuntimeSource.Contains(
+            "DrainQueuedLoad();",
+            StringComparison.Ordinal),
+        "multiplayer update drains the latest queued restore payload");
+    CheckEqual(
+        true,
+        multiplayerSaveRuntimeSource.Contains(
+            "AbandonWithoutWorldMutation",
+            StringComparison.Ordinal),
+        "world exit abandons restore ownership without destroying world objects");
+    CheckEqual(
+        true,
+        multiplayerSaveRuntimeSource.Contains(
+            "Instance.OnDeinitialized();",
+            StringComparison.Ordinal),
+        "active-world deinitialization uses explicit owned-fallback cleanup");
+    CheckEqual(
+        true,
+        multiplayerSaveRuntimeSource.Contains(
+            "_queuedLoads.SuspendAndClear();",
+            StringComparison.Ordinal),
+        "lifecycle reset rejects loads reentered by fallback cleanup");
+    CheckEqual(
+        true,
+        multiplayerSaveRuntimeSource.Contains(
+            "resumeLoads: false",
+            StringComparison.Ordinal),
+        "deinitialization keeps multiplayer load intake suspended");
 
     string uiPath = FindRepositoryFile("SOTFNeonLettersUi.cs")
         ?? throw new InvalidOperationException("Could not find the color editor UI adapter.");

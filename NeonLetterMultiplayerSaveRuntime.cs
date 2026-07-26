@@ -11,8 +11,12 @@ namespace SOTFNeonLetters;
 internal sealed class NeonLetterMultiplayerSaveRuntime
     : ICustomSaveable<NeonLetterMultiplayerSaveEnvelope>
 {
-    private const int MaxRestoreItemsPerTick = 16;
-    private const int MaxFallbackSpawnsPerTick = 2;
+    private const int MaxRestoreItemsPerTick =
+        NeonLetterMultiplayerRestoreCoordinator<RestoreTarget>
+            .MaxItemsPerUpdate;
+    private const int MaxFallbackSpawnsPerTick =
+        NeonLetterMultiplayerRestoreCoordinator<RestoreTarget>
+            .MaxFallbackSpawnsPerUpdate;
     private static readonly NeonLetterMultiplayerSaveRuntime Instance = new();
     private static readonly NeonLetterLifecycleCoordinator Lifecycle = new();
     private static readonly Func<
@@ -28,6 +32,9 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         _restoreCoordinator = new();
     private readonly NeonLetterRestoreReadinessScheduler<
         MultiplayerRestoreProgress> _restoreReadiness = new();
+    private readonly NeonLetterMonotonicSequence _restoreSignals = new();
+    private readonly NeonLetterMultiplayerRestoreLoadQueue
+        _queuedLoads = new();
     private readonly Dictionary<int, RestoreTarget> _nativeTargets = new();
     private readonly Dictionary<int, StructureRecipe> _processedRecipes = new();
     private readonly Func<
@@ -39,7 +46,6 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         _startFallback;
     private bool _afterLoadSaveReceived;
     private bool _afterSpawnReceived;
-    private long _restoreSignalGeneration;
     private long _restoreUpdateTick;
 
     private NeonLetterMultiplayerSaveRuntime()
@@ -60,6 +66,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
         try
         {
+            Instance._queuedLoads.Resume();
             SdkEvents.AfterLoadSave.Subscribe(Instance.OnAfterLoadSave);
             Lifecycle.CompleteStage(
                 () => SdkEvents.AfterLoadSave.Unsubscribe(
@@ -99,7 +106,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             exception => RLog.Error(
                 $"[SOTFNeonLetters] Multiplayer persistence cleanup failed: " +
                 exception));
-        Instance.OnWorldExited();
+        Instance.OnDeinitialized();
     }
 
     public NeonLetterMultiplayerSaveEnvelope Save()
@@ -148,9 +155,10 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
     public void Load(NeonLetterMultiplayerSaveEnvelope obj)
     {
-        _restoreCoordinator.Stage(obj);
-        SignalRestoreProgress();
-        ResolveKnownNetworkRole();
+        if (_queuedLoads.Enqueue(obj))
+        {
+            SignalRestoreProgress();
+        }
     }
 
     private static bool TryCreateSaveEntry(
@@ -245,29 +253,70 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
     {
         _afterSpawnReceived = true;
         SignalRestoreProgress();
-        if (!BoltNetwork.isRunning)
-        {
-            _restoreCoordinator.SetRole(
-                NeonLetterMultiplayerRestoreRole.SinglePlayer);
-            return;
-        }
     }
 
     private void OnInWorldUpdate()
     {
+        DrainQueuedLoad();
         AdvanceRestore();
     }
 
     private void OnWorldExited()
     {
-        _restoreCoordinator.Clear();
-        _nativeTargets.Clear();
-        _processedRecipes.Clear();
-        _afterLoadSaveReceived = false;
-        _afterSpawnReceived = false;
-        _restoreReadiness.Reset();
-        _restoreSignalGeneration = 0;
-        _restoreUpdateTick = 0;
+        ResetRuntimeState(
+            rollbackOwnedFallbacks: false,
+            resumeLoads: true);
+    }
+
+    private void OnDeinitialized()
+    {
+        ResetRuntimeState(
+            rollbackOwnedFallbacks: true,
+            resumeLoads: false);
+    }
+
+    private void ResetRuntimeState(
+        bool rollbackOwnedFallbacks,
+        bool resumeLoads)
+    {
+        _queuedLoads.SuspendAndClear();
+        try
+        {
+            if (rollbackOwnedFallbacks)
+            {
+                _restoreCoordinator.Clear();
+            }
+            else
+            {
+                _restoreCoordinator.AbandonWithoutWorldMutation();
+            }
+        }
+        finally
+        {
+            _nativeTargets.Clear();
+            _processedRecipes.Clear();
+            _afterLoadSaveReceived = false;
+            _afterSpawnReceived = false;
+            _restoreReadiness.Reset();
+            _restoreUpdateTick = 0;
+            _queuedLoads.SuspendAndClear();
+            if (resumeLoads && _initialized)
+            {
+                _queuedLoads.Resume();
+            }
+        }
+    }
+
+    private void DrainQueuedLoad()
+    {
+        if (!_queuedLoads.TryDequeue(
+                out NeonLetterMultiplayerSaveEnvelope envelope))
+        {
+            return;
+        }
+
+        _restoreCoordinator.Stage(envelope);
+        ResolveKnownNetworkRole();
     }
 
     private void AdvanceRestore()
@@ -386,7 +435,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         int structureCount)
     {
         return new MultiplayerRestoreProgress(
-            _restoreSignalGeneration,
+            _restoreSignals.Current,
             _restoreCoordinator.Role,
             managerAvailable,
             managerLoading,
@@ -408,14 +457,11 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
     private void SignalRestoreProgress()
     {
-        unchecked
-        {
-            _restoreSignalGeneration++;
-        }
+        _restoreSignals.Advance();
     }
 
     private readonly record struct MultiplayerRestoreProgress(
-        long SignalGeneration,
+        ulong SignalGeneration,
         NeonLetterMultiplayerRestoreRole Role,
         bool ManagerAvailable,
         bool IsLoadingSave,

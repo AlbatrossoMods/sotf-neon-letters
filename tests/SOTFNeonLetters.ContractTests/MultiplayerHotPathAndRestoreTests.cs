@@ -951,7 +951,7 @@ public sealed class MultiplayerHotPathAndRestoreTests
             onEntryError: (_, exception) => throw exception);
 
         Assert.Equal(
-            ("2,3,1", 1, "4", 0),
+            ("2", 1, "4", 0),
             (
                 string.Join(",", firstObserved),
                 pendingAfterFirstAdvance,
@@ -960,7 +960,7 @@ public sealed class MultiplayerHotPathAndRestoreTests
     }
 
     [Fact]
-    public void CurrentRestoreSliceFinishesBeforeStagedReplacementIsProcessed()
+    public void StagedReplacementCancelsTheCurrentRestoreSliceBeforeApply()
     {
         NeonLetterMultiplayerRestoreCoordinator<string> coordinator =
             CreateCoordinator(1, 2);
@@ -1014,7 +1014,7 @@ public sealed class MultiplayerHotPathAndRestoreTests
             onEntryError: (_, exception) => throw exception);
 
         Assert.Equal(
-            ("1,2,3", 1, 0),
+            ("3", 1, 0),
             (
                 string.Join(",", restored),
                 pendingAfterFirstAdvance,
@@ -1022,7 +1022,93 @@ public sealed class MultiplayerHotPathAndRestoreTests
     }
 
     [Fact]
-    public void NestedRestoreAdvanceConsumesTheReservedNextSlice()
+    public void ReentrantClearCancelsFallbackBeforeSpawn()
+    {
+        NeonLetterMultiplayerRestoreCoordinator<string> coordinator =
+            CreateCoordinator(0);
+        int fallbackStartCount = 0;
+
+        coordinator.AdvanceForReadinessToken(
+            readinessToken: 1,
+            maxItems: 16,
+            maxFallbackSpawns: 2,
+            observe: (_, _, _) =>
+            {
+                coordinator.Clear();
+                return new NeonLetterMultiplayerRestoreObservation<string>(
+                    NeonLetterMultiplayerRestoreObservationKind
+                        .ReadyToSpawnFallback);
+            },
+            startFallback: _ =>
+            {
+                fallbackStartCount++;
+                return "fallback";
+            },
+            applyRestored: (_, _) => true,
+            onEntryError: (_, exception) => throw exception);
+
+        Assert.Equal(
+            (0, NeonLetterMultiplayerRestoreRole.Unknown, 0),
+            (
+                fallbackStartCount,
+                coordinator.Role,
+                coordinator.PendingCount));
+    }
+
+    [Fact]
+    public void ReentrantStageDuringNativeRecheckCancelsOldApply()
+    {
+        NeonLetterMultiplayerRestoreCoordinator<string> coordinator =
+            CreateCoordinator(1);
+        int observeCount = 0;
+        var restoredSaveIds = new List<int>();
+
+        coordinator.AdvanceForReadinessToken(
+            readinessToken: 1,
+            maxItems: 16,
+            maxFallbackSpawns: 2,
+            observe: (entry, _, _) =>
+            {
+                observeCount++;
+                if (observeCount == 1)
+                {
+                    return new
+                        NeonLetterMultiplayerRestoreObservation<string>(
+                            NeonLetterMultiplayerRestoreObservationKind
+                                .ReadyToSpawnFallback);
+                }
+
+                coordinator.Stage(new NeonLetterMultiplayerSaveEnvelope
+                {
+                    Entries = new List<NeonLetterMultiplayerSaveEntry>
+                    {
+                        CreateEntry(2)
+                    }
+                });
+                return new NeonLetterMultiplayerRestoreObservation<string>(
+                    NeonLetterMultiplayerRestoreObservationKind
+                        .NativeTargetReady,
+                    Target: "stale-native",
+                    ResolvedRecipeId: entry.RecipeId);
+            },
+            startFallback: _ => "fallback",
+            applyRestored: (entry, _) =>
+            {
+                restoredSaveIds.Add(entry.NativeSaveId);
+                return true;
+            },
+            onEntryError: (_, exception) => throw exception);
+
+        Assert.Equal(
+            (2, "", 1),
+            (
+                observeCount,
+                string.Join(",", restoredSaveIds),
+                coordinator.PendingCount));
+    }
+
+    [Fact]
+    public void NestedRestoreAdvanceIsDeferredUntilTheNextUpdate()
     {
         NeonLetterMultiplayerRestoreCoordinator<string> coordinator =
             CreateCoordinator(1, 2, 3);
@@ -1069,7 +1155,7 @@ public sealed class MultiplayerHotPathAndRestoreTests
             onEntryError: (_, exception) => throw exception);
 
         Assert.Equal(
-            ("1,3,2", 0),
+            ("1,2", 1),
             (string.Join(",", observed), coordinator.PendingCount));
     }
 
@@ -1123,7 +1209,7 @@ public sealed class MultiplayerHotPathAndRestoreTests
             onEntryError: (_, exception) => throw exception);
 
         Assert.Equal(
-            (1, "1,3,2", 0),
+            (0, "1,2", 1),
             (
                 nestedObservedCount,
                 string.Join(",", observed),

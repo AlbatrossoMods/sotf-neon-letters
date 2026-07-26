@@ -261,6 +261,44 @@ public sealed class FallbackRollbackRegressionTests
     }
 
     [Fact]
+    public void ReentrantStageDuringObserveCancelsOwnedFallbackApplyOnce()
+    {
+        NeonLetterMultiplayerRestoreCoordinator<RestoreTarget> coordinator =
+            CreateCoordinator();
+        int rollbackCount = 0;
+        int applyCount = 0;
+        ActivateFallback(
+            coordinator,
+            () => rollbackCount++,
+            (_, exception) => throw exception);
+
+        coordinator.AdvanceForReadinessToken(
+            readinessToken: 1,
+            maxItems: 16,
+            maxFallbackSpawns: 2,
+            observe: (_, _, target) =>
+            {
+                coordinator.Stage(CreateEnvelope(nativeSaveId: 2));
+                return new
+                    NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
+                        NeonLetterMultiplayerRestoreObservationKind
+                            .FallbackTargetReady,
+                        target);
+            },
+            startFallback: _ => throw new InvalidOperationException(),
+            applyRestored: (_, _) =>
+            {
+                applyCount++;
+                return true;
+            },
+            onEntryError: (_, exception) => throw exception);
+
+        Assert.Equal(
+            (1, 0, 1),
+            (rollbackCount, applyCount, coordinator.PendingCount));
+    }
+
+    [Fact]
     public void ClearingTheRestoreRollsBackTheOwnedFallback()
     {
         NeonLetterMultiplayerRestoreCoordinator<RestoreTarget> coordinator =
