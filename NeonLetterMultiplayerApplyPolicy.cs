@@ -54,7 +54,8 @@ internal sealed class NeonLetterHostApplyCoordinator<TPeer, TKey>
         bool isHost,
         bool isLive,
         int recipeId,
-        NeonRgba color)
+        NeonRgba color,
+        Func<NeonRgba, bool>? tryApply = null)
     {
         if (TryResolveReplay(
                 peer,
@@ -72,12 +73,20 @@ internal sealed class NeonLetterHostApplyCoordinator<TPeer, TKey>
                 false,
                 _authoritative.Resolve(identity),
                 _authoritative.ResolveState(identity).Revision)
-            : _authoritative.TryAccept(
-                isHost,
-                identity,
-                isLive,
-                recipeId,
-                color);
+            : tryApply == null
+                ? _authoritative.TryAccept(
+                    isHost,
+                    identity,
+                    isLive,
+                    recipeId,
+                    color)
+                : _authoritative.TryAccept(
+                    isHost,
+                    identity,
+                    isLive,
+                    recipeId,
+                    color,
+                    tryApply);
         var result = new NeonLetterApplyResult<TKey>(
             requestId,
             identity,

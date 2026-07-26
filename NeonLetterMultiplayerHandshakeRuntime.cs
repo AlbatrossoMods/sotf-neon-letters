@@ -72,6 +72,7 @@ internal static partial class NeonLetterMultiplayerRuntime
             _hostHandshakes.Remove(connection);
             HostApplyCoordinator.Remove(connection);
             ColorPageHostCoordinator.Remove(connection);
+            ColorPageResponseScheduler.Remove(connection);
         }
 
         foreach (BoltConnection connection in
@@ -86,7 +87,7 @@ internal static partial class NeonLetterMultiplayerRuntime
                 helloId: 0,
                 NeonLetterHandshakeStatus.MissingHello,
                 connection);
-            DeferredDisconnects.Schedule(connection);
+            QuarantineHostConnection(connection);
             RLog.Error(
                 $"[SOTFNeonLetters] Rejected multiplayer client " +
                 $"{connection.ConnectionId}: handshake hello was not received within " +
@@ -229,7 +230,7 @@ internal static partial class NeonLetterMultiplayerRuntime
             return;
         }
 
-        DeferredDisconnects.Schedule(fromConnection);
+        QuarantineHostConnection(fromConnection);
         RLog.Error(
             $"[SOTFNeonLetters] Rejected multiplayer client {connectionId}: " +
             $"{FormatHandshakeStatus(status)}.");
@@ -245,7 +246,7 @@ internal static partial class NeonLetterMultiplayerRuntime
             helloId: 0,
             NeonLetterHandshakeStatus.MalformedHello,
             fromConnection);
-        DeferredDisconnects.Schedule(fromConnection);
+        QuarantineHostConnection(fromConnection);
         RLog.Error(
             $"[SOTFNeonLetters] Rejected multiplayer client {connectionId}: " +
             "malformed handshake hello.");
@@ -422,6 +423,7 @@ internal static partial class NeonLetterMultiplayerRuntime
     {
         _hostHandshakes?.Clear();
         HostApplyCoordinator.Clear();
+        ColorPageResponseScheduler.Clear();
         if (beginClientSession)
         {
             ClientSession.BeginSession(

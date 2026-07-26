@@ -12,6 +12,12 @@ internal static class NeonLetterColorPageProtocol
     internal const double RetryIntervalSeconds = 2d;
 }
 
+internal static class NeonLetterColorPageDeliveryProtocol
+{
+    internal const int MaxPagesPerUpdate = 4;
+    internal const int MaxPendingPeers = 256;
+}
+
 internal readonly record struct NeonLetterColorPageEntry<TKey>(
     TKey Identity,
     ulong EntityRevision,
@@ -44,6 +50,8 @@ internal readonly record struct NeonLetterColorPageResponse<TKey>(
 internal interface INeonLetterColorPageWireReader<TKey>
     where TKey : notnull
 {
+    bool IsFullyConsumed { get; }
+
     byte ReadByte();
 
     ulong ReadUInt64();
@@ -104,6 +112,12 @@ internal static class NeonLetterColorPageWireParser
                 reader.ReadColor(version));
         }
 
+        if (!reader.IsFullyConsumed)
+        {
+            throw new InvalidDataException(
+                "The color page response contains trailing data.");
+        }
+
         return new NeonLetterColorPageResponse<TKey>(
             version,
             syncId,
@@ -120,6 +134,107 @@ internal readonly record struct NeonLetterTargetedColorPage<TPeer, TKey>(
     NeonLetterColorPageResponse<TKey> Response)
     where TPeer : notnull
     where TKey : notnull;
+
+internal sealed class NeonLetterColorPageResponseScheduler<TPeer, TKey>
+    where TPeer : notnull
+    where TKey : notnull
+{
+    private readonly Dictionary<
+        TPeer,
+        LinkedListNode<NeonLetterTargetedColorPage<TPeer, TKey>>> _byPeer =
+            new();
+    private readonly LinkedList<
+        NeonLetterTargetedColorPage<TPeer, TKey>> _pending = new();
+
+    internal int PendingCount => _byPeer.Count;
+
+    internal bool TrySchedule(
+        NeonLetterTargetedColorPage<TPeer, TKey> delivery)
+    {
+        if (_byPeer.ContainsKey(delivery.Peer))
+        {
+            return true;
+        }
+
+        if (_byPeer.Count >=
+            NeonLetterColorPageDeliveryProtocol.MaxPendingPeers)
+        {
+            return false;
+        }
+
+        LinkedListNode<NeonLetterTargetedColorPage<TPeer, TKey>> node =
+            _pending.AddLast(delivery);
+        _byPeer.Add(delivery.Peer, node);
+        return true;
+    }
+
+    internal int Drain(
+        Func<TPeer, bool> canSend,
+        Action<NeonLetterTargetedColorPage<TPeer, TKey>> send,
+        Action<TPeer, Exception> onFailure)
+    {
+        ArgumentNullException.ThrowIfNull(canSend);
+        ArgumentNullException.ThrowIfNull(send);
+        ArgumentNullException.ThrowIfNull(onFailure);
+
+        var updateBatch =
+            new NeonLetterTargetedColorPage<TPeer, TKey>[
+                NeonLetterColorPageDeliveryProtocol.MaxPagesPerUpdate];
+        int batchCount = 0;
+        while (batchCount < updateBatch.Length &&
+               _pending.First != null)
+        {
+            LinkedListNode<
+                NeonLetterTargetedColorPage<TPeer, TKey>> node =
+                    _pending.First;
+            _pending.RemoveFirst();
+            _byPeer.Remove(node.Value.Peer);
+            updateBatch[batchCount++] = node.Value;
+        }
+
+        int sentCount = 0;
+        for (int index = 0; index < batchCount; index++)
+        {
+            NeonLetterTargetedColorPage<TPeer, TKey> delivery =
+                updateBatch[index];
+            if (!canSend(delivery.Peer))
+            {
+                continue;
+            }
+
+            try
+            {
+                send(delivery);
+                sentCount++;
+            }
+            catch (Exception exception)
+            {
+                onFailure(delivery.Peer, exception);
+            }
+        }
+
+        return sentCount;
+    }
+
+    internal void Remove(TPeer peer)
+    {
+        if (!_byPeer.Remove(
+                peer,
+                out LinkedListNode<
+                    NeonLetterTargetedColorPage<TPeer, TKey>>? node))
+        {
+            return;
+        }
+
+        _pending.Remove(node);
+    }
+
+    internal void Clear()
+    {
+        _byPeer.Clear();
+        _pending.Clear();
+    }
+}
 
 internal sealed class NeonLetterColorPageHostCoordinator<TPeer, TKey>
     where TPeer : notnull

@@ -761,6 +761,223 @@ public sealed class MultiplayerSessionProtocolTests
     }
 
     [Fact]
+    public void RemoteGlobalSerialExhaustionRejectsBeforeVisualApply()
+    {
+        var authoritative = new NeonLetterAuthoritativeColors<int>(
+            initialChangeSerial: ulong.MaxValue);
+        var coordinator =
+            new NeonLetterHostApplyCoordinator<string, int>(authoritative);
+        int visualApplyCount = 0;
+
+        NeonLetterHostApplyOutcome<int> outcome = coordinator.Process(
+            "peer",
+            requestId: 1,
+            identity: 7,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Red,
+            tryApply: _ =>
+            {
+                visualApplyCount++;
+                return true;
+            });
+
+        Assert.Equal(
+            (
+                NeonLetterApplyStatus.Rejected,
+                NeonRgba.ProjectCyan,
+                0ul,
+                false,
+                0,
+                ulong.MaxValue),
+            (
+                outcome.Result.Status,
+                outcome.Result.AuthoritativeColor,
+                outcome.Result.Revision,
+                outcome.ShouldBroadcast,
+                visualApplyCount,
+                authoritative.CurrentChangeSerial));
+    }
+
+    [Fact]
+    public void HostLocalGlobalSerialExhaustionRejectsBeforeVisualApply()
+    {
+        var authoritative = new NeonLetterAuthoritativeColors<int>(
+            initialChangeSerial: ulong.MaxValue);
+        int visualApplyCount = 0;
+
+        NeonLetterColorAcceptance acceptance = authoritative.TryAccept(
+            isHost: true,
+            identity: 7,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Red,
+            tryApply: _ =>
+            {
+                visualApplyCount++;
+                return true;
+            });
+
+        Assert.Equal(
+            (false, NeonRgba.ProjectCyan, 0ul, 0, ulong.MaxValue),
+            (
+                acceptance.Accepted,
+                acceptance.AuthoritativeColor,
+                acceptance.Revision,
+                visualApplyCount,
+                authoritative.CurrentChangeSerial));
+    }
+
+    [Fact]
+    public void LastGlobalSerialIsAcceptedOnceThenFailsClosed()
+    {
+        var authoritative = new NeonLetterAuthoritativeColors<int>(
+            initialChangeSerial: ulong.MaxValue - 1);
+        int visualApplyCount = 0;
+
+        NeonLetterColorAcceptance last = authoritative.TryAccept(
+            isHost: true,
+            identity: 7,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Red,
+            tryApply: _ =>
+            {
+                visualApplyCount++;
+                return true;
+            });
+        NeonLetterColorAcceptance exhausted = authoritative.TryAccept(
+            isHost: true,
+            identity: 8,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Green,
+            tryApply: _ =>
+            {
+                visualApplyCount++;
+                return true;
+            });
+
+        Assert.Equal(
+            (
+                true,
+                1ul,
+                false,
+                0ul,
+                1,
+                ulong.MaxValue,
+                Red,
+                NeonRgba.ProjectCyan),
+            (
+                last.Accepted,
+                last.Revision,
+                exhausted.Accepted,
+                exhausted.Revision,
+                visualApplyCount,
+                authoritative.CurrentChangeSerial,
+                authoritative.Resolve(7),
+                authoritative.Resolve(8)));
+    }
+
+    [Fact]
+    public void LastEntityRevisionIsAcceptedOnceThenFailsClosed()
+    {
+        var authoritative = new NeonLetterAuthoritativeColors<int>(
+            initialIdentity: 7,
+            initialColor: Red,
+            initialRevision: ulong.MaxValue - 1,
+            initialChangeSerial: 1);
+        var coordinator =
+            new NeonLetterHostApplyCoordinator<string, int>(authoritative);
+        int visualApplyCount = 0;
+        Func<NeonRgba, bool> tryApply = _ =>
+        {
+            visualApplyCount++;
+            return true;
+        };
+
+        NeonLetterHostApplyOutcome<int> last = coordinator.Process(
+            "peer",
+            requestId: 1,
+            identity: 7,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Green,
+            tryApply);
+        NeonLetterHostApplyOutcome<int> exhausted = coordinator.Process(
+            "peer",
+            requestId: 2,
+            identity: 7,
+            isHost: true,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Blue,
+            tryApply);
+
+        Assert.Equal(
+            (
+                NeonLetterApplyStatus.Accepted,
+                ulong.MaxValue,
+                true,
+                NeonLetterApplyStatus.Rejected,
+                ulong.MaxValue,
+                false,
+                1,
+                Green),
+            (
+                last.Result.Status,
+                last.Result.Revision,
+                last.ShouldBroadcast,
+                exhausted.Result.Status,
+                exhausted.Result.Revision,
+                exhausted.ShouldBroadcast,
+                visualApplyCount,
+                authoritative.Resolve(7)));
+    }
+
+    [Fact]
+    public void VisualApplyFailureDoesNotConsumeReservedCounters()
+    {
+        var authoritative = new NeonLetterAuthoritativeColors<int>();
+        int visualApplyCount = 0;
+        NeonLetterColorAcceptance failed = authoritative.TryAccept(
+            isHost: true,
+            identity: 7,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Red,
+            tryApply: _ =>
+            {
+                visualApplyCount++;
+                return false;
+            });
+        NeonLetterColorAcceptance retried = authoritative.TryAccept(
+            isHost: true,
+            identity: 7,
+            isLive: true,
+            recipeId: NeonLetterSmallCatalog.All[0].RecipeId,
+            Green,
+            tryApply: _ =>
+            {
+                visualApplyCount++;
+                return true;
+            });
+
+        Assert.Equal(
+            (false, 0ul, true, 1ul, 1ul, 2, Green),
+            (
+                failed.Accepted,
+                failed.Revision,
+                retried.Accepted,
+                retried.Revision,
+                authoritative.CurrentChangeSerial,
+                visualApplyCount,
+                authoritative.Resolve(7)));
+    }
+
+    [Fact]
     public void HostRejectsAnEvictedReplayWithoutMutatingAuthoritativeState()
     {
         const int capacity =

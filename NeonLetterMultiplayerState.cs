@@ -26,6 +26,16 @@ public readonly record struct NeonLetterColorAcceptance(
     }
 }
 
+internal readonly record struct NeonLetterColorReservation<TKey>(
+    TKey Identity,
+    NeonRgba Color,
+    ulong ExpectedRevision,
+    ulong ExpectedChangeSerial,
+    ulong ExpectedLastChangeSerial,
+    ulong Revision,
+    ulong ChangeSerial)
+    where TKey : notnull;
+
 internal delegate bool NeonLetterPendingReadyCallback<TState, TKey>(
     ref TState state,
     TKey identity);
@@ -58,6 +68,33 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
         _lastChangeSerial = initialChangeSerial;
     }
 
+    internal NeonLetterAuthoritativeColors(
+        TKey initialIdentity,
+        NeonRgba initialColor,
+        ulong initialRevision,
+        ulong initialChangeSerial)
+    {
+        if (initialRevision == 0 || initialChangeSerial == 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(initialRevision),
+                "Initial authoritative state must use nonzero counters.");
+        }
+
+        NeonRgba canonicalColor = NeonLetterNetworkProtocol.Unpack(
+            NeonLetterNetworkProtocol.CurrentVersion,
+            NeonLetterNetworkProtocol.Pack(initialColor));
+        _colors.Add(
+            initialIdentity,
+            new AuthoritativeEntry(
+                canonicalColor,
+                initialRevision,
+                initialChangeSerial));
+        _entriesByChangeSerial.Add(
+            new IndexedEntry(initialChangeSerial, initialIdentity));
+        _lastChangeSerial = initialChangeSerial;
+    }
+
     internal int CurrentEntryCount => _colors.Count;
     internal int IndexedEntryCount => _entriesByChangeSerial.Count;
     internal ulong CurrentChangeSerial => _lastChangeSerial;
@@ -69,7 +106,13 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
         int recipeId,
         NeonRgba color)
     {
-        if (!isHost || !isLive || !IsKnownRecipe(recipeId))
+        if (!TryReserve(
+                isHost,
+                identity,
+                isLive,
+                recipeId,
+                color,
+                out NeonLetterColorReservation<TKey> reservation))
         {
             AuthoritativeEntry current = ResolveEntry(identity);
             return new NeonLetterColorAcceptance(
@@ -78,56 +121,125 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
                 current.Revision);
         }
 
-        uint packedColor = NeonLetterNetworkProtocol.Pack(color);
+        return Commit(reservation);
+    }
+
+    internal NeonLetterColorAcceptance TryAccept(
+        bool isHost,
+        TKey identity,
+        bool isLive,
+        int recipeId,
+        NeonRgba color,
+        Func<NeonRgba, bool> tryApply)
+    {
+        ArgumentNullException.ThrowIfNull(tryApply);
+        if (!TryReserve(
+                isHost,
+                identity,
+                isLive,
+                recipeId,
+                color,
+                out NeonLetterColorReservation<TKey> reservation) ||
+            !tryApply(reservation.Color))
+        {
+            AuthoritativeEntry current = ResolveEntry(identity);
+            return new NeonLetterColorAcceptance(
+                false,
+                current.Color,
+                current.Revision);
+        }
+
+        return Commit(reservation);
+    }
+
+    internal bool TryReserve(
+        bool isHost,
+        TKey identity,
+        bool isLive,
+        int recipeId,
+        NeonRgba color,
+        out NeonLetterColorReservation<TKey> reservation)
+    {
+        AuthoritativeEntry currentState = ResolveEntry(identity);
+        if (!isHost ||
+            !isLive ||
+            !IsKnownRecipe(recipeId) ||
+            currentState.Revision == ulong.MaxValue ||
+            _lastChangeSerial == ulong.MaxValue)
+        {
+            reservation = default;
+            return false;
+        }
+
         NeonRgba canonicalColor = NeonLetterNetworkProtocol.Unpack(
             NeonLetterNetworkProtocol.CurrentVersion,
-            packedColor);
-        AuthoritativeEntry currentState = ResolveEntry(identity);
-        if (currentState.Revision == ulong.MaxValue)
-        {
-            throw new InvalidOperationException(
-                "The authoritative color revision space is exhausted.");
-        }
-
-        if (_lastChangeSerial == ulong.MaxValue)
-        {
-            throw new InvalidOperationException(
-                "The authoritative color change serial space is exhausted.");
-        }
-
+            NeonLetterNetworkProtocol.Pack(color));
         ulong revision = currentState.Revision + 1;
         ulong changeSerial = _lastChangeSerial + 1;
+        reservation = new NeonLetterColorReservation<TKey>(
+            identity,
+            canonicalColor,
+            currentState.Revision,
+            currentState.ChangeSerial,
+            _lastChangeSerial,
+            revision,
+            changeSerial);
+        return true;
+    }
+
+    internal NeonLetterColorAcceptance Commit(
+        NeonLetterColorReservation<TKey> reservation)
+    {
+        AuthoritativeEntry currentState = ResolveEntry(
+            reservation.Identity);
+        if (currentState.Revision != reservation.ExpectedRevision ||
+            currentState.ChangeSerial !=
+                reservation.ExpectedChangeSerial ||
+            _lastChangeSerial != reservation.ExpectedLastChangeSerial ||
+            reservation.Revision == 0 ||
+            reservation.ChangeSerial == 0)
+        {
+            throw new InvalidOperationException(
+                "The authoritative color reservation is stale.");
+        }
+
         if (currentState.ChangeSerial != 0 &&
             !_entriesByChangeSerial.Remove(
-                new IndexedEntry(currentState.ChangeSerial, identity)))
+                new IndexedEntry(
+                    currentState.ChangeSerial,
+                    reservation.Identity)))
         {
             throw new InvalidOperationException(
                 "The authoritative color serial index is inconsistent.");
         }
 
-        var indexed = new IndexedEntry(changeSerial, identity);
+        var indexed = new IndexedEntry(
+            reservation.ChangeSerial,
+            reservation.Identity);
         if (!_entriesByChangeSerial.Add(indexed))
         {
             if (currentState.ChangeSerial != 0)
             {
                 _entriesByChangeSerial.Add(
-                    new IndexedEntry(currentState.ChangeSerial, identity));
+                    new IndexedEntry(
+                        currentState.ChangeSerial,
+                        reservation.Identity));
             }
 
             throw new InvalidOperationException(
                 "The authoritative color change serial was reused.");
         }
 
-        _colors[identity] = new AuthoritativeEntry(
-            canonicalColor,
-            revision,
-            changeSerial);
-        _lastChangeSerial = changeSerial;
+        _colors[reservation.Identity] = new AuthoritativeEntry(
+            reservation.Color,
+            reservation.Revision,
+            reservation.ChangeSerial);
+        _lastChangeSerial = reservation.ChangeSerial;
 
         return new NeonLetterColorAcceptance(
             true,
-            canonicalColor,
-            revision);
+            reservation.Color,
+            reservation.Revision);
     }
 
     internal NeonLetterAuthoritativeColorPage<TKey> CreatePage(

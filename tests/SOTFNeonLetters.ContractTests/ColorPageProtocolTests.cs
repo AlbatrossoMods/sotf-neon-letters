@@ -177,14 +177,13 @@ public sealed class ColorPageProtocolTests
             initialChangeSerial: ulong.MaxValue);
         int recipeId = NeonLetterSmallCatalog.Get('A').RecipeId;
 
-        InvalidOperationException exhausted =
-            Assert.Throws<InvalidOperationException>(
-                () => colors.TryAccept(
-                    isHost: true,
-                    identity: 1,
-                    isLive: true,
-                    recipeId,
-                    Red));
+        NeonLetterColorAcceptance exhausted = colors.TryAccept(
+            isHost: true,
+            identity: 1,
+            isLive: true,
+            recipeId,
+            Red);
+        ulong exhaustedSerial = colors.CurrentChangeSerial;
         colors.Clear();
         NeonLetterColorAcceptance afterReset = colors.TryAccept(
             isHost: true,
@@ -194,11 +193,11 @@ public sealed class ColorPageProtocolTests
             Red);
 
         Assert.Equal(
-            (true, 1ul, 1ul),
+            (false, 0ul, ulong.MaxValue, 1ul, 1ul),
             (
-                exhausted.Message.Contains(
-                    "change serial space is exhausted",
-                    StringComparison.Ordinal),
+                exhausted.Accepted,
+                exhausted.Revision,
+                exhaustedSerial,
                 colors.CurrentChangeSerial,
                 afterReset.Revision));
     }
@@ -309,6 +308,196 @@ public sealed class ColorPageProtocolTests
             (
                 afterDisconnect,
                 (host.PeerCount, host.OutstandingPageCount)));
+    }
+
+    [Fact]
+    public void ThousandDuplicateDeliveriesCoalesceBeforeOneUpdateDrain()
+    {
+        var scheduler =
+            new NeonLetterColorPageResponseScheduler<int, ulong>();
+        NeonLetterTargetedColorPage<int, ulong> delivery =
+            CreateDelivery(peer: 1);
+        bool allScheduled = true;
+        int serialized = 0;
+        for (int duplicate = 0; duplicate < 1_000; duplicate++)
+        {
+            allScheduled &= scheduler.TrySchedule(delivery);
+        }
+
+        int pendingBeforeDrain = scheduler.PendingCount;
+        int serializedBeforeDrain = serialized;
+        int sent = scheduler.Drain(
+            canSend: _ => true,
+            send: _ => serialized++,
+            onFailure: (_, _) => { });
+
+        Assert.Equal(
+            (true, 1, 0, 1, 1, 0),
+            (
+                allScheduled,
+                pendingBeforeDrain,
+                serializedBeforeDrain,
+                sent,
+                serialized,
+                scheduler.PendingCount));
+    }
+
+    [Fact]
+    public void PageDeliveryDrainIsFairAndGloballyBoundedPerUpdate()
+    {
+        var scheduler =
+            new NeonLetterColorPageResponseScheduler<int, ulong>();
+        for (int peer = 1; peer <= 10; peer++)
+        {
+            scheduler.TrySchedule(CreateDelivery(peer));
+        }
+
+        var sentPeers = new List<int>();
+        int first = scheduler.Drain(
+            _ => true,
+            delivery => sentPeers.Add(delivery.Peer),
+            (_, _) => { });
+        int pendingAfterFirst = scheduler.PendingCount;
+        int second = scheduler.Drain(
+            _ => true,
+            delivery => sentPeers.Add(delivery.Peer),
+            (_, _) => { });
+        int pendingAfterSecond = scheduler.PendingCount;
+        int third = scheduler.Drain(
+            _ => true,
+            delivery => sentPeers.Add(delivery.Peer),
+            (_, _) => { });
+
+        Assert.Equal(
+            (
+                NeonLetterColorPageDeliveryProtocol.MaxPagesPerUpdate,
+                6,
+                NeonLetterColorPageDeliveryProtocol.MaxPagesPerUpdate,
+                2,
+                2,
+                "1,2,3,4,5,6,7,8,9,10"),
+            (
+                first,
+                pendingAfterFirst,
+                second,
+                pendingAfterSecond,
+                third,
+                string.Join(",", sentPeers)));
+    }
+
+    [Fact]
+    public void ExactRetryScheduledDuringSendWaitsForNextUpdate()
+    {
+        var scheduler =
+            new NeonLetterColorPageResponseScheduler<int, ulong>();
+        NeonLetterTargetedColorPage<int, ulong> delivery =
+            CreateDelivery(peer: 1);
+        scheduler.TrySchedule(delivery);
+        int serialized = 0;
+
+        int first = scheduler.Drain(
+            _ => true,
+            sent =>
+            {
+                serialized++;
+                scheduler.TrySchedule(sent);
+            },
+            (_, _) => { });
+        int pendingAfterFirst = scheduler.PendingCount;
+        int second = scheduler.Drain(
+            _ => true,
+            _ => serialized++,
+            (_, _) => { });
+
+        Assert.Equal(
+            (1, 1, 1, 1, 2, 0),
+            (
+                first,
+                pendingAfterFirst,
+                serialized - second,
+                second,
+                serialized,
+                scheduler.PendingCount));
+    }
+
+    [Fact]
+    public void FailedPageSendDoesNotBlockLaterPeers()
+    {
+        var scheduler =
+            new NeonLetterColorPageResponseScheduler<int, ulong>();
+        scheduler.TrySchedule(CreateDelivery(peer: 1));
+        scheduler.TrySchedule(CreateDelivery(peer: 2));
+        scheduler.TrySchedule(CreateDelivery(peer: 3));
+        var sentPeers = new List<int>();
+        var failedPeers = new List<int>();
+
+        int sent = scheduler.Drain(
+            _ => true,
+            delivery =>
+            {
+                if (delivery.Peer == 2)
+                {
+                    throw new InvalidOperationException("send failed");
+                }
+
+                sentPeers.Add(delivery.Peer);
+            },
+            (peer, _) => failedPeers.Add(peer));
+
+        Assert.Equal(
+            (2, "1,3", "2", 0),
+            (
+                sent,
+                string.Join(",", sentPeers),
+                string.Join(",", failedPeers),
+                scheduler.PendingCount));
+    }
+
+    [Fact]
+    public void QuarantineDisconnectAndSessionCleanupBoundPendingPages()
+    {
+        var scheduler =
+            new NeonLetterColorPageResponseScheduler<int, ulong>();
+        scheduler.TrySchedule(CreateDelivery(peer: 1));
+        scheduler.TrySchedule(CreateDelivery(peer: 2));
+        scheduler.Remove(peer: 1);
+        var sentPeers = new List<int>();
+
+        int sent = scheduler.Drain(
+            canSend: peer => peer != 2,
+            send: delivery => sentPeers.Add(delivery.Peer),
+            onFailure: (_, _) => { });
+        scheduler.TrySchedule(CreateDelivery(peer: 3));
+        scheduler.Clear();
+
+        Assert.Equal(
+            (0, string.Empty, 0),
+            (sent, string.Join(",", sentPeers), scheduler.PendingCount));
+    }
+
+    [Fact]
+    public void HostilePendingPeerCountFailsClosedAtNamedMaximum()
+    {
+        var scheduler =
+            new NeonLetterColorPageResponseScheduler<int, ulong>();
+        bool allWithinLimit = true;
+        for (int peer = 1;
+             peer <= NeonLetterColorPageDeliveryProtocol.MaxPendingPeers;
+             peer++)
+        {
+            allWithinLimit &= scheduler.TrySchedule(CreateDelivery(peer));
+        }
+
+        bool overflow = scheduler.TrySchedule(
+            CreateDelivery(
+                NeonLetterColorPageDeliveryProtocol.MaxPendingPeers + 1));
+
+        Assert.Equal(
+            (
+                true,
+                false,
+                NeonLetterColorPageDeliveryProtocol.MaxPendingPeers),
+            (allWithinLimit, overflow, scheduler.PendingCount));
     }
 
     [Fact]
@@ -1088,7 +1277,7 @@ public sealed class ColorPageProtocolTests
                     "ColorPageClientCoordinator.TryAcceptResponse",
                     StringComparison.Ordinal),
                 runtime.Contains(
-                    "DeferredDisconnects.Schedule(delivery.Peer)",
+                    "ScheduleFailedColorPageConnection",
                     StringComparison.Ordinal),
                 runtime.Contains(
                     "NeonLetterColorPageWireParser.ReadResponse",
@@ -1124,6 +1313,41 @@ public sealed class ColorPageProtocolTests
                     StringComparison.Ordinal),
                 handshake.Contains(
                     "ColorPageClientCoordinator.Clear()",
+                    StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void RuntimeSerializesPageResponsesOnlyDuringBoundedDrain()
+    {
+        string runtime = File.ReadAllText(
+            FindRepositoryFile("NeonLetterMultiplayerRuntime.cs"));
+        string requestHandler = ExtractSourceSegment(
+            runtime,
+            "private static void HandleColorPageRequest",
+            "private static void DrainColorPageResponses");
+        string responseDrain = ExtractSourceSegment(
+            runtime,
+            "private static void DrainColorPageResponses",
+            "private static void SendColorPageDelivery");
+        string sendAdapter = ExtractSourceSegment(
+            runtime,
+            "private static void SendColorPageDelivery",
+            "private static void ScheduleFailedColorPageConnection");
+
+        Assert.Equal(
+            (true, false, true, true),
+            (
+                requestHandler.Contains(
+                    "ColorPageResponseScheduler.TrySchedule",
+                    StringComparison.Ordinal),
+                requestHandler.Contains(
+                    "ColorPageResponse.SendResponse",
+                    StringComparison.Ordinal),
+                responseDrain.Contains(
+                    "ColorPageResponseScheduler.Drain",
+                    StringComparison.Ordinal),
+                sendAdapter.Contains(
+                    "ColorPageResponse.SendResponse",
                     StringComparison.Ordinal)));
     }
 
@@ -1297,6 +1521,18 @@ public sealed class ColorPageProtocolTests
                 EntryTokens(identity: 1, revision: 0)));
     }
 
+    [Fact]
+    public void WireParserRejectsTrailingFrameData()
+    {
+        object[] tokens = HeaderTokens(
+            count: 0,
+            complete: 1).Concat(
+                new object[] { (byte)99 }).ToArray();
+
+        Assert.Throws<InvalidDataException>(
+            () => ReadWireResponse(tokens));
+    }
+
     private static NeonLetterAuthoritativeColors<ulong> CreateColors(int count)
     {
         var colors = new NeonLetterAuthoritativeColors<ulong>();
@@ -1392,6 +1628,27 @@ public sealed class ColorPageProtocolTests
             entries);
     }
 
+    private static NeonLetterTargetedColorPage<int, ulong> CreateDelivery(
+        int peer)
+    {
+        return new NeonLetterTargetedColorPage<int, ulong>(
+            peer,
+            new NeonLetterColorPageResponse<ulong>(
+                NeonLetterColorPageProtocol.ProtocolVersion,
+                SyncId: (ulong)peer,
+                Sequence: 1,
+                WatermarkChangeSerial: 1,
+                NextCursorChangeSerial: 1,
+                Complete: true,
+                new[]
+                {
+                    new NeonLetterColorPageEntry<ulong>(
+                        Identity: (ulong)peer,
+                        EntityRevision: 1,
+                        Green)
+                }));
+    }
+
     private static NeonLetterColorPageResponse<ulong> ReadWireResponse(
         object[] tokens)
     {
@@ -1444,6 +1701,25 @@ public sealed class ColorPageProtocolTests
             $"Could not find repository file '{relativePath}'.");
     }
 
+    private static string ExtractSourceSegment(
+        string source,
+        string startMarker,
+        string endMarker)
+    {
+        int start = source.IndexOf(startMarker, StringComparison.Ordinal);
+        int end = source.IndexOf(
+            endMarker,
+            start + startMarker.Length,
+            StringComparison.Ordinal);
+        if (start < 0 || end < 0)
+        {
+            throw new InvalidOperationException(
+                $"Could not find source segment '{startMarker}'.");
+        }
+
+        return source.Substring(start, end - start);
+    }
+
     private struct ScriptedColorPageWireReader :
         INeonLetterColorPageWireReader<ulong>
     {
@@ -1455,6 +1731,8 @@ public sealed class ColorPageProtocolTests
             _tokens = tokens;
             _index = 0;
         }
+
+        public bool IsFullyConsumed => _index == _tokens.Length;
 
         public byte ReadByte()
         {

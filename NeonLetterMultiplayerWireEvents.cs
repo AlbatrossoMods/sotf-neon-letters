@@ -263,6 +263,8 @@ internal static partial class NeonLetterMultiplayerRuntime
             _packet = packet;
         }
 
+        public bool IsFullyConsumed => _packet.Done;
+
         public byte ReadByte()
         {
             return _packet.ReadByte();

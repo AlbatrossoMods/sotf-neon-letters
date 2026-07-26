@@ -50,6 +50,9 @@ internal static partial class NeonLetterMultiplayerRuntime
     private static readonly NeonLetterColorPageHostCoordinator<
         BoltConnection,
         ulong> ColorPageHostCoordinator = new(AuthoritativeColors);
+    private static readonly NeonLetterColorPageResponseScheduler<
+        BoltConnection,
+        ulong> ColorPageResponseScheduler = new();
     private static readonly NeonLetterColorPageClientCoordinator<ulong>
         ColorPageClientCoordinator = new();
     private static readonly NeonLetterLifecycleCoordinator Lifecycle = new();
@@ -95,6 +98,12 @@ internal static partial class NeonLetterMultiplayerRuntime
             static connection => connection.Disconnect();
     private static readonly Action<BoltConnection, Exception>
         LogHostDisconnectFailureCallback = LogHostDisconnectFailure;
+    private static readonly Action<
+        NeonLetterTargetedColorPage<BoltConnection, ulong>>
+        SendColorPageDeliveryCallback = SendColorPageDelivery;
+    private static readonly Action<BoltConnection, Exception>
+        ScheduleFailedColorPageCallback =
+            ScheduleFailedColorPageConnection;
     private static bool _changeRequestRegistered;
     private static bool _changeResultRegistered;
     private static bool _colorStateRegistered;
@@ -133,6 +142,11 @@ internal static partial class NeonLetterMultiplayerRuntime
                 () => SdkEvents.OnInWorldUpdate.Unsubscribe(
                     AdvanceSession));
 
+            SdkEvents.OnInWorldUpdate.Subscribe(DrainColorPageResponses);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.OnInWorldUpdate.Unsubscribe(
+                    DrainColorPageResponses));
+
             SdkEvents.OnInWorldUpdate.Subscribe(RequestColorPage);
             Lifecycle.CompleteStage(
                 () => SdkEvents.OnInWorldUpdate.Unsubscribe(
@@ -161,6 +175,7 @@ internal static partial class NeonLetterMultiplayerRuntime
         AuthoritativeColors.Clear();
         HostApplyCoordinator.Clear();
         ColorPageHostCoordinator.Clear();
+        ColorPageResponseScheduler.Clear();
         ColorPageClientCoordinator.Clear();
         ClearSessionState();
     }
@@ -455,6 +470,7 @@ internal static partial class NeonLetterMultiplayerRuntime
         {
             _colorPageRequestRegistered = false;
             ColorPageHostCoordinator.Clear();
+            ColorPageResponseScheduler.Clear();
         }
     }
 
@@ -729,27 +745,54 @@ internal static partial class NeonLetterMultiplayerRuntime
             return;
         }
 
+        if (!ColorPageResponseScheduler.TrySchedule(delivery))
+        {
+            ScheduleFailedColorPageConnection(
+                delivery.Peer,
+                new InvalidOperationException(
+                    "The pending color page peer limit was reached."));
+        }
+    }
+
+    private static void DrainColorPageResponses()
+    {
+        if (!BoltNetwork.isRunning ||
+            !NetUtils.IsServer ||
+            ColorPageResponseScheduler.PendingCount == 0)
+        {
+            return;
+        }
+
+        ColorPageResponseScheduler.Drain(
+            IsAcceptedForModTrafficCallback,
+            SendColorPageDeliveryCallback,
+            ScheduleFailedColorPageCallback);
+    }
+
+    private static void SendColorPageDelivery(
+        NeonLetterTargetedColorPage<BoltConnection, ulong> delivery)
+    {
+        ColorPageResponse.SendResponse(
+            delivery.Response,
+            delivery.Peer);
+    }
+
+    private static void ScheduleFailedColorPageConnection(
+        BoltConnection connection,
+        Exception exception)
+    {
+        QuarantineHostConnection(connection);
         try
         {
-            ColorPageResponse.SendResponse(
-                delivery.Response,
-                delivery.Peer);
+            RLog.Error(
+                $"[SOTFNeonLetters] Failed to send " +
+                $"{ColorPageResponse.Id} to " +
+                $"{connection.ConnectionId}; disconnect scheduled: " +
+                exception);
         }
-        catch (Exception exception)
+        catch
         {
-            DeferredDisconnects.Schedule(delivery.Peer);
-            try
-            {
-                RLog.Error(
-                    $"[SOTFNeonLetters] Failed to send " +
-                    $"{ColorPageResponse.Id} to " +
-                    $"{delivery.Peer.ConnectionId}; disconnect scheduled: " +
-                    exception);
-            }
-            catch
-            {
-                // Logging must not undo quarantine after a delivery failure.
-            }
+            // Logging must not undo quarantine after a delivery failure.
         }
     }
 
@@ -941,21 +984,23 @@ internal static partial class NeonLetterMultiplayerRuntime
                 out _,
                 out structure,
                 out definition);
-        if (isLive)
+
+        bool TryApplyRequestedColor(NeonRgba canonicalColor)
         {
             try
             {
                 NeonLetterColorRuntime.ApplyEmission(
                     structure.gameObject,
                     definition,
-                    color);
+                    canonicalColor);
+                return true;
             }
             catch (Exception exception)
             {
-                isLive = false;
                 RLog.Error(
                     $"[SOTFNeonLetters] Failed to apply requested color for " +
                     $"{networkId.PackedValue}: {exception}");
+                return false;
             }
         }
 
@@ -970,7 +1015,8 @@ internal static partial class NeonLetterMultiplayerRuntime
                 isHost: true,
                 isLive,
                 recipeId,
-                color);
+                color,
+                TryApplyRequestedColor);
         TrySendColorResult(outcome.Result, fromConnection);
         if (outcome.ShouldBroadcast)
         {
@@ -1031,21 +1077,20 @@ internal static partial class NeonLetterMultiplayerRuntime
             return false;
         }
 
-        uint packedColor = NeonLetterNetworkProtocol.Pack(color);
-        NeonRgba canonicalColor = NeonLetterNetworkProtocol.Unpack(
-            NeonLetterNetworkProtocol.CurrentVersion,
-            packedColor);
-        NeonLetterColorRuntime.ApplyEmission(
-            structure.gameObject,
-            definition,
-            canonicalColor);
-
         NeonLetterColorAcceptance acceptance = AuthoritativeColors.TryAccept(
             isHost: true,
             identity: networkId.PackedValue,
             isLive: true,
             recipeId: definition.RecipeId,
-            canonicalColor);
+            color,
+            tryApply: canonicalColor =>
+            {
+                NeonLetterColorRuntime.ApplyEmission(
+                    structure.gameObject,
+                    definition,
+                    canonicalColor);
+                return true;
+            });
         if (!acceptance.Accepted)
         {
             return false;
@@ -1095,7 +1140,7 @@ internal static partial class NeonLetterMultiplayerRuntime
         BoltConnection connection,
         Exception exception)
     {
-        DeferredDisconnects.Schedule(connection);
+        QuarantineHostConnection(connection);
         try
         {
             RLog.Error(
@@ -1106,6 +1151,12 @@ internal static partial class NeonLetterMultiplayerRuntime
         {
             // A logging failure must not block delivery to later peers.
         }
+    }
+
+    private static void QuarantineHostConnection(BoltConnection connection)
+    {
+        ColorPageResponseScheduler.Remove(connection);
+        DeferredDisconnects.Schedule(connection);
     }
 
     private static bool TryResolveLiveLetter(
