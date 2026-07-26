@@ -11,6 +11,17 @@ namespace SOTFNeonLetters;
 
 internal static partial class NeonLetterMultiplayerRuntime
 {
+    private static readonly HashSet<BoltConnection>
+        CurrentHostConnections = new();
+    private static readonly NeonLetterReentrantSnapshotPool<BoltConnection>
+        MissingHostConnectionSnapshots = new();
+    private static readonly Action<BoltConnection>
+        ObserveHostConnectionCallback = ObserveHostConnection;
+    private static readonly Action<BoltConnection>
+        RejectExpiredHostHandshakeCallback =
+            RejectExpiredHostHandshake;
+    private static double _hostHandshakeObservationTime;
+
     private static void AdvanceSession()
     {
         if (!BoltNetwork.isRunning)
@@ -52,46 +63,67 @@ internal static partial class NeonLetterMultiplayerRuntime
             return;
         }
 
-        var currentConnections = new HashSet<BoltConnection>();
-        BoltNetwork.clients.ForEach((Action<BoltConnection>)(connection =>
-        {
-            currentConnections.Add(connection);
-            HostConnections.Add(connection);
-            _hostHandshakes.Observe(connection, nowSeconds);
-        }));
+        CurrentHostConnections.Clear();
+        _hostHandshakeObservationTime = nowSeconds;
+        BoltNetwork.clients.ForEach(ObserveHostConnectionCallback);
 
-        foreach (BoltConnection connection in HostConnections.ToArray())
+        List<BoltConnection> missingConnections =
+            MissingHostConnectionSnapshots.Rent();
+        try
         {
-            if (currentConnections.Contains(connection))
+            foreach (BoltConnection connection in HostConnections)
             {
-                continue;
+                if (!CurrentHostConnections.Contains(connection))
+                {
+                    missingConnections.Add(connection);
+                }
             }
 
-            HostConnections.Remove(connection);
-            DeferredDisconnects.Remove(connection);
-            _hostHandshakes.Remove(connection);
-            HostApplyCoordinator.Remove(connection);
-            ColorPageHostCoordinator.Remove(connection);
-        }
-
-        foreach (BoltConnection connection in
-            _hostHandshakes.RejectExpiredUnknown(nowSeconds))
-        {
-            if (!HostConnections.Contains(connection))
+            foreach (BoltConnection connection in missingConnections)
             {
-                continue;
+                HostConnections.Remove(connection);
+                DeferredDisconnects.Remove(connection);
+                _hostHandshakes.Remove(connection);
+                HostApplyCoordinator.Remove(connection);
+                ColorPageHostCoordinator.Remove(connection);
             }
-
-            TrySendHandshakeResult(
-                helloId: 0,
-                NeonLetterHandshakeStatus.MissingHello,
-                connection);
-            QuarantineHostConnection(connection);
-            RLog.Error(
-                $"[SOTFNeonLetters] Rejected multiplayer client " +
-                $"{connection.ConnectionId}: handshake hello was not received within " +
-                $"{NeonLetterSessionProtocol.NegotiationTimeoutSeconds:0} seconds.");
         }
+        finally
+        {
+            MissingHostConnectionSnapshots.Return(missingConnections);
+        }
+
+        _hostHandshakes.DrainExpiredUnknown(
+            nowSeconds,
+            RejectExpiredHostHandshakeCallback);
+    }
+
+    private static void ObserveHostConnection(BoltConnection connection)
+    {
+        CurrentHostConnections.Add(connection);
+        HostConnections.Add(connection);
+        _hostHandshakes?.Observe(
+            connection,
+            _hostHandshakeObservationTime);
+    }
+
+    private static void RejectExpiredHostHandshake(
+        BoltConnection connection)
+    {
+        if (!HostConnections.Contains(connection))
+        {
+            return;
+        }
+
+        TrySendHandshakeResult(
+            helloId: 0,
+            NeonLetterHandshakeStatus.MissingHello,
+            connection);
+        QuarantineHostConnection(connection);
+        RLog.Error(
+            $"[SOTFNeonLetters] Rejected multiplayer client " +
+            $"{connection.ConnectionId}: handshake hello was not received within " +
+            $"{NeonLetterSessionProtocol.NegotiationTimeoutSeconds:0} seconds.");
     }
 
     private static void AdvanceClientHandshake(double nowSeconds)
@@ -436,6 +468,7 @@ internal static partial class NeonLetterMultiplayerRuntime
         }
 
         HostConnections.Clear();
+        CurrentHostConnections.Clear();
         DeferredDisconnects.Clear();
         DeferredClientDisconnects.Clear();
         HelloScheduler.Clear();

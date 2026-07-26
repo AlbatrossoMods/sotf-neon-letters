@@ -228,6 +228,9 @@ internal sealed class NeonLetterClientApplyCoordinator<TKey>
     private readonly Dictionary<TKey, PendingApply> _pending = new();
     private readonly Dictionary<TKey, NeonLetterAuthoritativeColor>
         _authoritative = new();
+    private readonly NeonLetterReentrantSnapshotPool<
+        NeonLetterClientApplyDecision<TKey>> _timedOutDecisionSnapshots =
+            new();
     private ulong _nextRequestId;
 
     public NeonLetterClientApplyCoordinator(double timeoutSeconds)
@@ -388,31 +391,56 @@ internal sealed class NeonLetterClientApplyCoordinator<TKey>
                 decision.Revision);
     }
 
-    public IReadOnlyList<NeonLetterClientApplyDecision<TKey>> RejectTimedOut(
+    public NeonLetterClientApplyDecision<TKey>[] RejectTimedOut(
         double nowSeconds)
     {
         ValidateNow(nowSeconds);
 
-        var decisions = new List<NeonLetterClientApplyDecision<TKey>>();
-        foreach ((TKey identity, PendingApply pending) in _pending.ToArray())
+        List<NeonLetterClientApplyDecision<TKey>> decisions =
+            _timedOutDecisionSnapshots.Rent();
+        try
         {
-            if (nowSeconds < pending.ExpiresAtSeconds)
+            CollectAndRemoveTimedOut(nowSeconds, decisions);
+            if (decisions.Count == 0)
             {
-                continue;
+                return Array.Empty<NeonLetterClientApplyDecision<TKey>>();
             }
 
-            _pending.Remove(identity);
-            NeonLetterAuthoritativeColor authoritative =
-                ResolveAuthoritative(identity);
-            decisions.Add(new NeonLetterClientApplyDecision<TKey>(
-                NeonLetterClientApplyAction.Rollback,
-                pending.RequestId,
-                identity,
-                authoritative.Color,
-                authoritative.Revision));
+            var result =
+                new NeonLetterClientApplyDecision<TKey>[decisions.Count];
+            decisions.CopyTo(result);
+            return result;
         }
+        finally
+        {
+            _timedOutDecisionSnapshots.Return(decisions);
+        }
+    }
 
-        return decisions;
+    public int DrainTimedOut(
+        double nowSeconds,
+        Action<NeonLetterClientApplyDecision<TKey>> onTimedOut)
+    {
+        ArgumentNullException.ThrowIfNull(onTimedOut);
+        ValidateNow(nowSeconds);
+
+        List<NeonLetterClientApplyDecision<TKey>> decisions =
+            _timedOutDecisionSnapshots.Rent();
+        try
+        {
+            CollectAndRemoveTimedOut(nowSeconds, decisions);
+            foreach (NeonLetterClientApplyDecision<TKey> decision in
+                     decisions)
+            {
+                onTimedOut(decision);
+            }
+
+            return decisions.Count;
+        }
+        finally
+        {
+            _timedOutDecisionSnapshots.Return(decisions);
+        }
     }
 
     public NeonLetterAuthoritativeColor ResolveAuthoritative(TKey identity)
@@ -445,6 +473,38 @@ internal sealed class NeonLetterClientApplyCoordinator<TKey>
         _authoritative.Clear();
         // Wire results have no session epoch, so request IDs must remain
         // process-lifetime identities across reconnects.
+    }
+
+    private void CollectAndRemoveTimedOut(
+        double nowSeconds,
+        List<NeonLetterClientApplyDecision<TKey>> decisions)
+    {
+        foreach ((TKey identity, PendingApply pending) in _pending)
+        {
+            if (nowSeconds < pending.ExpiresAtSeconds)
+            {
+                continue;
+            }
+
+            NeonLetterAuthoritativeColor authoritative =
+                ResolveAuthoritative(identity);
+            var decision = new NeonLetterClientApplyDecision<TKey>(
+                NeonLetterClientApplyAction.Rollback,
+                pending.RequestId,
+                identity,
+                authoritative.Color,
+                authoritative.Revision);
+            if (!_timedOutDecisionSnapshots.IsReservedByOuterBuffer(
+                    decision))
+            {
+                decisions.Add(decision);
+            }
+        }
+
+        foreach (NeonLetterClientApplyDecision<TKey> decision in decisions)
+        {
+            _pending.Remove(decision.Identity);
+        }
     }
 
     private void UpdateAuthoritative(

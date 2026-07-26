@@ -303,6 +303,8 @@ internal sealed class NeonLetterHandshakeRegistry<TPeer>
     private readonly NeonLetterSessionFingerprint _expected;
     private readonly double _timeoutSeconds;
     private readonly Dictionary<TPeer, PeerEntry> _peers = new();
+    private readonly NeonLetterReentrantSnapshotPool<TPeer>
+        _expiredPeerSnapshots = new();
 
     public NeonLetterHandshakeRegistry(
         NeonLetterSessionIdentity expected,
@@ -354,28 +356,51 @@ internal sealed class NeonLetterHandshakeRegistry<TPeer>
         return status;
     }
 
-    public IReadOnlyList<TPeer> RejectExpiredUnknown(double nowSeconds)
+    public TPeer[] RejectExpiredUnknown(double nowSeconds)
     {
         ValidateNow(nowSeconds);
 
-        var expired = new List<TPeer>();
-        foreach ((TPeer peer, PeerEntry entry) in _peers)
+        List<TPeer> expiredPeers = _expiredPeerSnapshots.Rent();
+        try
         {
-            if (entry.State != NeonLetterPeerState.Unknown ||
-                nowSeconds - entry.ObservedAtSeconds < _timeoutSeconds)
+            CollectAndRejectExpiredUnknown(nowSeconds, expiredPeers);
+            if (expiredPeers.Count == 0)
             {
-                continue;
+                return Array.Empty<TPeer>();
             }
 
-            _peers[peer] = entry with
-            {
-                State = NeonLetterPeerState.Rejected,
-                Status = NeonLetterHandshakeStatus.MissingHello
-            };
-            expired.Add(peer);
+            var result = new TPeer[expiredPeers.Count];
+            expiredPeers.CopyTo(result);
+            return result;
         }
+        finally
+        {
+            _expiredPeerSnapshots.Return(expiredPeers);
+        }
+    }
 
-        return expired;
+    public int DrainExpiredUnknown(
+        double nowSeconds,
+        Action<TPeer> onExpired)
+    {
+        ArgumentNullException.ThrowIfNull(onExpired);
+        ValidateNow(nowSeconds);
+
+        List<TPeer> expiredPeers = _expiredPeerSnapshots.Rent();
+        try
+        {
+            CollectAndRejectExpiredUnknown(nowSeconds, expiredPeers);
+            foreach (TPeer peer in expiredPeers)
+            {
+                onExpired(peer);
+            }
+
+            return expiredPeers.Count;
+        }
+        finally
+        {
+            _expiredPeerSnapshots.Return(expiredPeers);
+        }
     }
 
     public void Reject(
@@ -429,6 +454,33 @@ internal sealed class NeonLetterHandshakeRegistry<TPeer>
     public void Clear()
     {
         _peers.Clear();
+    }
+
+    private void CollectAndRejectExpiredUnknown(
+        double nowSeconds,
+        List<TPeer> expiredPeers)
+    {
+        foreach ((TPeer peer, PeerEntry entry) in _peers)
+        {
+            if (entry.State != NeonLetterPeerState.Unknown ||
+                nowSeconds - entry.ObservedAtSeconds < _timeoutSeconds ||
+                _expiredPeerSnapshots.IsReservedByOuterBuffer(peer))
+            {
+                continue;
+            }
+
+            expiredPeers.Add(peer);
+        }
+
+        foreach (TPeer peer in expiredPeers)
+        {
+            PeerEntry entry = _peers[peer];
+            _peers[peer] = entry with
+            {
+                State = NeonLetterPeerState.Rejected,
+                Status = NeonLetterHandshakeStatus.MissingHello
+            };
+        }
     }
 
     private NeonLetterHandshakeStatus Compare(
