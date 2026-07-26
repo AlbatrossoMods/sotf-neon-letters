@@ -4,7 +4,16 @@ namespace SOTFNeonLetters;
 
 public readonly record struct NeonLetterColorAcceptance(
     bool Accepted,
-    NeonRgba AuthoritativeColor);
+    NeonRgba AuthoritativeColor,
+    ulong Revision)
+{
+    public NeonLetterColorAcceptance(
+        bool accepted,
+        NeonRgba authoritativeColor)
+        : this(accepted, authoritativeColor, Revision: 0)
+    {
+    }
+}
 
 internal delegate bool NeonLetterPendingReadyCallback<TState, TKey>(
     ref TState state,
@@ -23,7 +32,9 @@ internal delegate void NeonLetterPendingApplyErrorCallback<TState, TKey>(
 public sealed class NeonLetterAuthoritativeColors<TKey>
     where TKey : notnull
 {
-    private readonly Dictionary<TKey, NeonRgba> _colors = new();
+    private readonly Dictionary<TKey, NeonLetterAuthoritativeColor> _colors =
+        new();
+    private ulong _revision;
 
     public NeonLetterColorAcceptance TryAccept(
         bool isHost,
@@ -34,16 +45,32 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
     {
         if (!isHost || !isLive || !IsKnownRecipe(recipeId))
         {
-            return new NeonLetterColorAcceptance(false, Resolve(identity));
+            NeonLetterAuthoritativeColor current = ResolveState(identity);
+            return new NeonLetterColorAcceptance(
+                false,
+                current.Color,
+                current.Revision);
         }
 
         uint packedColor = NeonLetterNetworkProtocol.Pack(color);
         NeonRgba canonicalColor = NeonLetterNetworkProtocol.Unpack(
             NeonLetterNetworkProtocol.CurrentVersion,
             packedColor);
-        _colors[identity] = canonicalColor;
+        if (_revision == ulong.MaxValue)
+        {
+            throw new InvalidOperationException(
+                "The authoritative color revision space is exhausted.");
+        }
 
-        return new NeonLetterColorAcceptance(true, canonicalColor);
+        ulong revision = ++_revision;
+        _colors[identity] = new NeonLetterAuthoritativeColor(
+            canonicalColor,
+            revision);
+
+        return new NeonLetterColorAcceptance(
+            true,
+            canonicalColor,
+            revision);
     }
 
     public IReadOnlyList<KeyValuePair<TKey, NeonRgba>> Snapshot(
@@ -53,11 +80,14 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
 
         var snapshot = new List<KeyValuePair<TKey, NeonRgba>>(_colors.Count);
         var deadIdentities = new List<TKey>();
-        foreach (KeyValuePair<TKey, NeonRgba> entry in _colors)
+        foreach (KeyValuePair<TKey, NeonLetterAuthoritativeColor> entry in _colors)
         {
             if (isLive(entry.Key))
             {
-                snapshot.Add(entry);
+                snapshot.Add(
+                    new KeyValuePair<TKey, NeonRgba>(
+                        entry.Key,
+                        entry.Value.Color));
             }
             else
             {
@@ -75,9 +105,18 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
 
     public NeonRgba Resolve(TKey identity)
     {
-        return _colors.TryGetValue(identity, out NeonRgba color)
-            ? color
-            : NeonRgba.ProjectCyan;
+        return ResolveState(identity).Color;
+    }
+
+    internal NeonLetterAuthoritativeColor ResolveState(TKey identity)
+    {
+        return _colors.TryGetValue(
+            identity,
+            out NeonLetterAuthoritativeColor state)
+                ? state
+                : new NeonLetterAuthoritativeColor(
+                    NeonRgba.ProjectCyan,
+                    Revision: 0);
     }
 
     /// <summary>
@@ -91,6 +130,7 @@ public sealed class NeonLetterAuthoritativeColors<TKey>
     public void Clear()
     {
         _colors.Clear();
+        _revision = 0;
     }
 
     private static bool IsKnownRecipe(int recipeId)

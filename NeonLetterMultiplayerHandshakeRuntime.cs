@@ -1,0 +1,413 @@
+using Bolt;
+using Endnight.Extensions;
+using RedLoader;
+using SonsSdk;
+using SonsSdk.Networking;
+using System.Reflection;
+using UdpKit;
+using UnityEngine;
+
+namespace SOTFNeonLetters;
+
+internal static partial class NeonLetterMultiplayerRuntime
+{
+    private static void AdvanceSession()
+    {
+        if (!BoltNetwork.isRunning)
+        {
+            if (_roleReady)
+            {
+                UnregisterRoleHandlers();
+                ClearSessionState();
+            }
+
+            return;
+        }
+
+        if (!_roleReady)
+        {
+            try
+            {
+                RegisterHandlersForCurrentRole();
+            }
+            catch (Exception exception)
+            {
+                RLog.Error(
+                    $"[SOTFNeonLetters] Failed to initialize multiplayer " +
+                    $"session: {exception}");
+                return;
+            }
+        }
+
+        DrainDeferredDisconnects();
+        double nowSeconds = Time.realtimeSinceStartupAsDouble;
+        if (NetUtils.IsServer)
+        {
+            AdvanceHostHandshakes(nowSeconds);
+        }
+        else if (NetUtils.IsClient)
+        {
+            AdvanceClientHandshake(nowSeconds);
+        }
+    }
+
+    private static void AdvanceHostHandshakes(double nowSeconds)
+    {
+        if (_hostHandshakes == null)
+        {
+            return;
+        }
+
+        var currentConnections = new HashSet<BoltConnection>();
+        BoltNetwork.clients.ForEach((Action<BoltConnection>)(connection =>
+        {
+            currentConnections.Add(connection);
+            HostConnections.Add(connection);
+            _hostHandshakes.Observe(connection, nowSeconds);
+        }));
+
+        foreach (BoltConnection connection in HostConnections.ToArray())
+        {
+            if (currentConnections.Contains(connection))
+            {
+                continue;
+            }
+
+            HostConnections.Remove(connection);
+            DeferredDisconnects.Remove(connection);
+            _hostHandshakes.Remove(connection);
+            HostApplyCoordinator.Remove(connection);
+        }
+
+        foreach (BoltConnection connection in
+            _hostHandshakes.RejectExpiredUnknown(nowSeconds))
+        {
+            if (!HostConnections.Contains(connection))
+            {
+                continue;
+            }
+
+            TrySendHandshakeResult(
+                helloId: 0,
+                NeonLetterHandshakeStatus.MissingHello,
+                connection);
+            DeferredDisconnects.Add(connection);
+            RLog.Error(
+                $"[SOTFNeonLetters] Rejected multiplayer client " +
+                $"{connection.ConnectionId}: handshake hello was not received within " +
+                $"{NeonLetterSessionProtocol.NegotiationTimeoutSeconds:0} seconds.");
+        }
+    }
+
+    private static void AdvanceClientHandshake(double nowSeconds)
+    {
+        if (_clientHandshakeAccepted || _clientDisconnectDeferred)
+        {
+            return;
+        }
+
+        if (HelloScheduler.HasTimedOut(nowSeconds))
+        {
+            RLog.Error(
+                $"[SOTFNeonLetters] Multiplayer handshake timed out after " +
+                $"{NeonLetterSessionProtocol.NegotiationTimeoutSeconds:0} seconds.");
+            _clientDisconnectDeferred = true;
+            return;
+        }
+
+        if (!HelloScheduler.ShouldSend(nowSeconds) ||
+            _sessionIdentity is not NeonLetterSessionIdentity identity)
+        {
+            return;
+        }
+
+        try
+        {
+            HandshakeHello.SendHello(
+                NeonLetterHandshakeHello.Create(_clientHelloId, identity));
+            HelloScheduler.MarkSent(nowSeconds);
+        }
+        catch (Exception exception)
+        {
+            RLog.Error(
+                $"[SOTFNeonLetters] Failed to send {HandshakeHello.Id}: " +
+                exception);
+        }
+    }
+
+    private static void DrainDeferredDisconnects()
+    {
+        if (_clientDisconnectDeferred &&
+            BoltNetwork.server != null)
+        {
+            _clientDisconnectDeferred = false;
+            try
+            {
+                BoltNetwork.server.Disconnect();
+            }
+            catch (Exception exception)
+            {
+                RLog.Error(
+                    $"[SOTFNeonLetters] Failed to disconnect rejected " +
+                    $"multiplayer session: {exception}");
+            }
+        }
+
+        foreach (BoltConnection connection in DeferredDisconnects.ToArray())
+        {
+            DeferredDisconnects.Remove(connection);
+            if (!HostConnections.Contains(connection))
+            {
+                continue;
+            }
+
+            try
+            {
+                connection.Disconnect();
+            }
+            catch (Exception exception)
+            {
+                RLog.Error(
+                    $"[SOTFNeonLetters] Failed to disconnect rejected client " +
+                    $"{connection.ConnectionId}: {exception}");
+            }
+        }
+    }
+
+    private static void HandleHandshakeHello(
+        UdpPacket packet,
+        BoltConnection fromConnection)
+    {
+        if (!BoltNetwork.isRunning ||
+            !NetUtils.IsServer ||
+            fromConnection == null ||
+            _hostHandshakes == null)
+        {
+            return;
+        }
+
+        uint connectionId = fromConnection.ConnectionId;
+        HostConnections.Add(fromConnection);
+        _hostHandshakes.Observe(
+            fromConnection,
+            Time.realtimeSinceStartupAsDouble);
+
+        byte handshakeVersion = packet.ReadByte();
+        if (handshakeVersion != NeonLetterSessionProtocol.HandshakeVersion)
+        {
+            RejectMalformedHello(fromConnection);
+            return;
+        }
+
+        ulong helloId = packet.ReadULong();
+        var fingerprint = new NeonLetterSessionFingerprint(
+            ReadDigest(packet),
+            packet.ReadByte(),
+            ReadDigest(packet),
+            ReadDigest(packet));
+        NeonLetterHandshakeStatus status = _hostHandshakes.AcceptHello(
+            fromConnection,
+            new NeonLetterHandshakeHello(helloId, fingerprint));
+        TrySendHandshakeResult(helloId, status, fromConnection);
+        if (status == NeonLetterHandshakeStatus.Accepted)
+        {
+            RLog.Msg(
+                $"[SOTFNeonLetters] Accepted multiplayer client " +
+                $"{connectionId} protocol handshake.");
+            return;
+        }
+
+        DeferredDisconnects.Add(fromConnection);
+        RLog.Error(
+            $"[SOTFNeonLetters] Rejected multiplayer client {connectionId}: " +
+            $"{FormatHandshakeStatus(status)}.");
+    }
+
+    private static void RejectMalformedHello(BoltConnection fromConnection)
+    {
+        uint connectionId = fromConnection.ConnectionId;
+        _hostHandshakes?.Reject(
+            fromConnection,
+            NeonLetterHandshakeStatus.MalformedHello);
+        TrySendHandshakeResult(
+            helloId: 0,
+            NeonLetterHandshakeStatus.MalformedHello,
+            fromConnection);
+        DeferredDisconnects.Add(fromConnection);
+        RLog.Error(
+            $"[SOTFNeonLetters] Rejected multiplayer client {connectionId}: " +
+            "malformed handshake hello.");
+    }
+
+    private static void HandleHandshakeResult(
+        UdpPacket packet,
+        BoltConnection fromConnection)
+    {
+        if (!IsStateFromHost(fromConnection))
+        {
+            return;
+        }
+
+        byte version = packet.ReadByte();
+        ulong helloId = packet.ReadULong();
+        var status = (NeonLetterHandshakeStatus)packet.ReadByte();
+        if (version != NeonLetterSessionProtocol.HandshakeVersion ||
+            helloId != _clientHelloId ||
+            !IsValidHandshakeStatus(status))
+        {
+            return;
+        }
+
+        if (status == NeonLetterHandshakeStatus.Accepted)
+        {
+            _clientHandshakeAccepted = true;
+            HelloScheduler.Clear();
+            RLog.Msg(
+                "[SOTFNeonLetters] Multiplayer protocol handshake accepted.");
+            RequestSnapshot();
+            return;
+        }
+
+        _clientHandshakeAccepted = false;
+        HelloScheduler.Clear();
+        _clientDisconnectDeferred = true;
+        RLog.Error(
+            $"[SOTFNeonLetters] Multiplayer protocol handshake rejected: " +
+            $"{FormatHandshakeStatus(status)}.");
+    }
+
+    private static bool IsValidHandshakeStatus(
+        NeonLetterHandshakeStatus status)
+    {
+        const NeonLetterHandshakeStatus allKnown =
+            NeonLetterHandshakeStatus.ReleaseVersionMismatch |
+            NeonLetterHandshakeStatus.ColorProtocolMismatch |
+            NeonLetterHandshakeStatus.CatalogMismatch |
+            NeonLetterHandshakeStatus.BundleMismatch |
+            NeonLetterHandshakeStatus.MissingHello |
+            NeonLetterHandshakeStatus.MalformedHello;
+        return (status & ~allKnown) == 0;
+    }
+
+    private static void TrySendHandshakeResult(
+        ulong helloId,
+        NeonLetterHandshakeStatus status,
+        BoltConnection connection)
+    {
+        try
+        {
+            HandshakeResult.SendResult(helloId, status, connection);
+        }
+        catch (Exception exception)
+        {
+            RLog.Error(
+                $"[SOTFNeonLetters] Failed to send {HandshakeResult.Id} to " +
+                $"{connection.ConnectionId}: {exception}");
+        }
+    }
+
+    private static bool IsAcceptedClient(BoltConnection fromConnection)
+    {
+        return BoltNetwork.isRunning &&
+            NetUtils.IsServer &&
+            fromConnection != null &&
+            _hostHandshakes?.IsAccepted(fromConnection) == true;
+    }
+
+    private static void StartClientHandshake()
+    {
+        if (_nextHelloId == 0)
+        {
+            throw new InvalidOperationException(
+                "The handshake identifier space is exhausted.");
+        }
+
+        _clientHelloId = _nextHelloId++;
+        HelloScheduler.Start(Time.realtimeSinceStartupAsDouble);
+    }
+
+    private static void EnsureSessionIdentity()
+    {
+        if (_sessionIdentity.HasValue)
+        {
+            return;
+        }
+
+        Assembly assembly =
+            typeof(global::SOTFNeonLetters.SOTFNeonLetters).Assembly;
+        string releaseVersion = assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion ??
+            throw new InvalidOperationException(
+                "The mod release version is unavailable.");
+        string assemblyDirectory = Path.GetDirectoryName(assembly.Location) ??
+            throw new InvalidOperationException(
+                "The installed mod directory is unavailable.");
+        string bundlePath = Path.Combine(
+            assemblyDirectory,
+            nameof(SOTFNeonLetters),
+            NeonLetterSmallCatalog.BundleName);
+
+        var catalogEntries =
+            new NeonLetterCatalogIdentityEntry[
+                NeonLetterSmallCatalog.All.Count];
+        for (int index = 0; index < catalogEntries.Length; index++)
+        {
+            NeonLetterSmallDefinition definition =
+                NeonLetterSmallCatalog.All[index];
+            catalogEntries[index] = new NeonLetterCatalogIdentityEntry(
+                index,
+                definition.RecipeId,
+                definition.CraftingNodeId,
+                definition.AssetKey,
+                definition.PrefabAssetName);
+        }
+
+        using FileStream bundleStream = File.OpenRead(bundlePath);
+        _sessionIdentity = new NeonLetterSessionIdentity(
+            releaseVersion,
+            NeonLetterNetworkProtocol.CurrentVersion,
+            NeonLetterSessionIdentityHasher.ComputeCatalogHash(
+                catalogEntries),
+            NeonLetterSessionIdentityHasher.ComputeBundleHash(bundleStream));
+        _hostHandshakes =
+            new NeonLetterHandshakeRegistry<BoltConnection>(
+            _sessionIdentity.Value,
+            NeonLetterSessionProtocol.NegotiationTimeoutSeconds);
+    }
+
+    private static void ResetRoleSession()
+    {
+        _hostHandshakes?.Clear();
+        HostApplyCoordinator.Clear();
+        ClientApplyCoordinator.Clear();
+        HostConnections.Clear();
+        DeferredDisconnects.Clear();
+        HelloScheduler.Clear();
+        _clientHandshakeAccepted = false;
+        _clientDisconnectDeferred = false;
+        _clientHelloId = 0;
+        _roleReady = false;
+        SnapshotRequestScheduler.Rearm();
+        SnapshotBatchCoordinator.Reset();
+        SnapshotSendCoordinator.Clear();
+    }
+
+    private static void ClearSessionState()
+    {
+        ResetRoleSession();
+        _hostHandshakes = null;
+        _sessionIdentity = null;
+    }
+
+    private static string FormatHandshakeStatus(
+        NeonLetterHandshakeStatus status)
+    {
+        return status switch
+        {
+            NeonLetterHandshakeStatus.Accepted => "accepted",
+            _ => status.ToString()
+        };
+    }
+
+}

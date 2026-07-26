@@ -1,4 +1,5 @@
 using Bolt;
+using Endnight.Extensions;
 using RedLoader;
 using Sons.Crafting.Structures;
 using SonsSdk;
@@ -8,12 +9,18 @@ using UnityEngine;
 
 namespace SOTFNeonLetters;
 
-internal static class NeonLetterMultiplayerRuntime
+internal static partial class NeonLetterMultiplayerRuntime
 {
     private const string ChangeRequestEventId =
-        "SOTFNeonLetters.ColorChangeRequest.v1";
+        "SOTFNeonLetters.ColorChangeRequest.v2";
+    private const string ChangeResultEventId =
+        "SOTFNeonLetters.ColorChangeResult.v1";
     private const string ColorStateEventId =
-        "SOTFNeonLetters.ColorState.v1";
+        "SOTFNeonLetters.ColorState.v2";
+    private const string HandshakeHelloEventId =
+        "SOTFNeonLetters.HandshakeHello.v1";
+    private const string HandshakeResultEventId =
+        "SOTFNeonLetters.HandshakeResult.v1";
     private const string SnapshotRequestEventId =
         "SOTFNeonLetters.ColorSnapshotRequest.v2";
     private const string SnapshotFrameEventId =
@@ -22,12 +29,21 @@ internal static class NeonLetterMultiplayerRuntime
     private const double PendingColorLifetimeSeconds = 15d;
     private static readonly NeonLetterAuthoritativeColors<ulong> AuthoritativeColors =
         new();
+    private static readonly NeonLetterHostApplyCoordinator<
+        BoltConnection,
+        ulong>
+        HostApplyCoordinator = new(AuthoritativeColors);
+    private static readonly NeonLetterClientApplyCoordinator<ulong>
+        ClientApplyCoordinator = new(PendingColorLifetimeSeconds);
     private static readonly NeonLetterReplicatedColorState<ulong> ReplicatedState =
         new(
             NeonLetterSnapshotProtocol.MaxSnapshotEntries,
             PendingColorLifetimeSeconds);
     private static readonly ColorChangeRequestEvent ChangeRequest = new();
+    private static readonly ColorChangeResultEvent ChangeResult = new();
     private static readonly ColorStateEvent ColorState = new();
+    private static readonly HandshakeHelloEvent HandshakeHello = new();
+    private static readonly HandshakeResultEvent HandshakeResult = new();
     private static readonly ColorSnapshotRequestEvent SnapshotRequest = new();
     private static readonly ColorSnapshotFrameEvent SnapshotFrame = new();
     private static readonly NeonLetterSnapshotRequestScheduler
@@ -37,6 +53,12 @@ internal static class NeonLetterMultiplayerRuntime
     private static readonly NeonLetterSnapshotSendCoordinator<BoltConnection>
         SnapshotSendCoordinator = new();
     private static readonly NeonLetterLifecycleCoordinator Lifecycle = new();
+    private static readonly NeonLetterHelloScheduler HelloScheduler = new(
+        NeonLetterSessionProtocol.HelloResendIntervalSeconds,
+        NeonLetterSessionProtocol.NegotiationTimeoutSeconds);
+    private static readonly HashSet<BoltConnection> HostConnections =
+        new();
+    private static readonly HashSet<BoltConnection> DeferredDisconnects = new();
     private static readonly Func<ulong, bool> IsLiveLetterIdentityCallback =
         IsLiveLetterIdentity;
     private static readonly Func<NeonLetterSnapshotEntry[]>
@@ -52,9 +74,19 @@ internal static class NeonLetterMultiplayerRuntime
     private static readonly Action<ulong, Exception>
         PendingColorApplyErrorCallback = LogPendingColorApplyError;
     private static bool _changeRequestRegistered;
+    private static bool _changeResultRegistered;
     private static bool _colorStateRegistered;
+    private static bool _handshakeHelloRegistered;
+    private static bool _handshakeResultRegistered;
     private static bool _snapshotRequestRegistered;
     private static bool _snapshotFrameRegistered;
+    private static NeonLetterSessionIdentity? _sessionIdentity;
+    private static NeonLetterHandshakeRegistry<BoltConnection> _hostHandshakes;
+    private static bool _clientHandshakeAccepted;
+    private static bool _clientDisconnectDeferred;
+    private static ulong _nextHelloId = 1;
+    private static ulong _clientHelloId;
+    private static bool _roleReady;
     private static bool _initialized;
 
     public static void Initialize()
@@ -75,6 +107,11 @@ internal static class NeonLetterMultiplayerRuntime
             Lifecycle.CompleteStage(
                 () => SdkEvents.OnInWorldUpdate.Unsubscribe(
                     DrainPendingColors));
+
+            SdkEvents.OnInWorldUpdate.Subscribe(AdvanceSession);
+            Lifecycle.CompleteStage(
+                () => SdkEvents.OnInWorldUpdate.Unsubscribe(
+                    AdvanceSession));
 
             SdkEvents.OnInWorldUpdate.Subscribe(RequestSnapshot);
             Lifecycle.CompleteStage(
@@ -107,10 +144,13 @@ internal static class NeonLetterMultiplayerRuntime
                 $"[SOTFNeonLetters] Multiplayer runtime cleanup failed: " +
                 exception));
         AuthoritativeColors.Clear();
+        HostApplyCoordinator.Clear();
+        ClientApplyCoordinator.Clear();
         ReplicatedState.Clear();
         SnapshotRequestScheduler.Rearm();
         SnapshotBatchCoordinator.Reset();
         SnapshotSendCoordinator.Clear();
+        ClearSessionState();
     }
 
     private static void RegisterHandlersForCurrentRole()
@@ -118,19 +158,26 @@ internal static class NeonLetterMultiplayerRuntime
         if (!BoltNetwork.isRunning)
         {
             UnregisterRoleHandlers();
+            ClearSessionState();
             return;
         }
 
+        EnsureSessionIdentity();
+        ResetRoleSession();
         if (NetUtils.IsServer)
         {
             // Unknown event IDs are dropped before Packets.HandlePacket relays
             // them, so client-bound events stay unregistered on the host.
             UnregisterColorState();
+            UnregisterChangeResult();
+            UnregisterHandshakeResult();
             UnregisterSnapshotFrame();
             try
             {
+                RegisterHandshakeHello();
                 RegisterChangeRequest();
                 RegisterSnapshotRequest();
+                _roleReady = true;
             }
             catch
             {
@@ -143,13 +190,17 @@ internal static class NeonLetterMultiplayerRuntime
 
         if (NetUtils.IsClient)
         {
+            UnregisterHandshakeHello();
             UnregisterChangeRequest();
             UnregisterSnapshotRequest();
             try
             {
+                RegisterHandshakeResult();
+                RegisterChangeResult();
                 RegisterColorState();
                 RegisterSnapshotFrame();
-                RequestSnapshot();
+                StartClientHandshake();
+                _roleReady = true;
             }
             catch
             {
@@ -165,7 +216,10 @@ internal static class NeonLetterMultiplayerRuntime
 
     private static void UnregisterRoleHandlers()
     {
+        UnregisterRoleHandler(UnregisterHandshakeHello);
+        UnregisterRoleHandler(UnregisterHandshakeResult);
         UnregisterRoleHandler(UnregisterChangeRequest);
+        UnregisterRoleHandler(UnregisterChangeResult);
         UnregisterRoleHandler(UnregisterColorState);
         UnregisterRoleHandler(UnregisterSnapshotRequest);
         UnregisterRoleHandler(UnregisterSnapshotFrame);
@@ -201,6 +255,39 @@ internal static class NeonLetterMultiplayerRuntime
 
         Packets.Register(ChangeRequest);
         _changeRequestRegistered = true;
+    }
+
+    private static void RegisterChangeResult()
+    {
+        if (_changeResultRegistered)
+        {
+            return;
+        }
+
+        Packets.Register(ChangeResult);
+        _changeResultRegistered = true;
+    }
+
+    private static void RegisterHandshakeHello()
+    {
+        if (_handshakeHelloRegistered)
+        {
+            return;
+        }
+
+        Packets.Register(HandshakeHello);
+        _handshakeHelloRegistered = true;
+    }
+
+    private static void RegisterHandshakeResult()
+    {
+        if (_handshakeResultRegistered)
+        {
+            return;
+        }
+
+        Packets.Register(HandshakeResult);
+        _handshakeResultRegistered = true;
     }
 
     private static void RegisterColorState()
@@ -250,6 +337,60 @@ internal static class NeonLetterMultiplayerRuntime
         finally
         {
             _changeRequestRegistered = false;
+        }
+    }
+
+    private static void UnregisterChangeResult()
+    {
+        if (!_changeResultRegistered)
+        {
+            return;
+        }
+
+        try
+        {
+            Packets.Unregister(ChangeResult);
+        }
+        finally
+        {
+            _changeResultRegistered = false;
+            ClientApplyCoordinator.Clear();
+        }
+    }
+
+    private static void UnregisterHandshakeHello()
+    {
+        if (!_handshakeHelloRegistered)
+        {
+            return;
+        }
+
+        try
+        {
+            Packets.Unregister(HandshakeHello);
+        }
+        finally
+        {
+            _handshakeHelloRegistered = false;
+        }
+    }
+
+    private static void UnregisterHandshakeResult()
+    {
+        if (!_handshakeResultRegistered)
+        {
+            return;
+        }
+
+        try
+        {
+            Packets.Unregister(HandshakeResult);
+        }
+        finally
+        {
+            _handshakeResultRegistered = false;
+            _clientHandshakeAccepted = false;
+            HelloScheduler.Clear();
         }
     }
 
@@ -322,7 +463,20 @@ internal static class NeonLetterMultiplayerRuntime
                 return false;
             }
 
-            ChangeRequest.SendRequest(networkId, color);
+            if (!_clientHandshakeAccepted)
+            {
+                return false;
+            }
+
+            NeonLetterApplyRequest<ulong> request =
+                ClientApplyCoordinator.Start(
+                    networkId.PackedValue,
+                    color,
+                    Time.realtimeSinceStartupAsDouble);
+            ChangeRequest.SendRequest(
+                request.RequestId,
+                networkId,
+                request.Color);
             return true;
         }
         catch (Exception exception)
@@ -350,13 +504,14 @@ internal static class NeonLetterMultiplayerRuntime
         }
 
         return NetUtils.IsClient
-            ? ReplicatedState.Resolve(identity)
+            ? ClientApplyCoordinator.ResolveAuthoritative(identity).Color
             : NeonRgba.ProjectCyan;
     }
 
     internal static void RemoveDismantledColor(ulong networkIdentity)
     {
         AuthoritativeColors.Remove(networkIdentity);
+        ClientApplyCoordinator.Remove(networkIdentity);
         ReplicatedState.Remove(networkIdentity);
     }
 
@@ -385,6 +540,7 @@ internal static class NeonLetterMultiplayerRuntime
             !BoltNetwork.isRunning ||
             !NetUtils.IsClient ||
             NetUtils.IsServer ||
+            !_clientHandshakeAccepted ||
             !SnapshotRequestScheduler.CanAttempt)
         {
             return;
@@ -414,30 +570,76 @@ internal static class NeonLetterMultiplayerRuntime
         UdpPacket packet,
         BoltConnection fromConnection)
     {
-        if (!BoltNetwork.isRunning || !NetUtils.IsServer || fromConnection == null)
+        if (!IsAcceptedClient(fromConnection))
         {
             return;
         }
 
         byte version = packet.ReadByte();
+        ulong requestId = packet.ReadULong();
         NetworkId networkId = packet.ReadNetworkId();
+        uint packedColor = packet.ReadUInt();
+        NeonRgba color = version == NeonLetterNetworkProtocol.CurrentVersion
+            ? NeonLetterNetworkProtocol.Unpack(version, packedColor)
+            : NeonRgba.ProjectCyan;
+        ProcessHostColorRequest(
+            fromConnection,
+            requestId,
+            networkId,
+            color,
+            version == NeonLetterNetworkProtocol.CurrentVersion);
+    }
+
+    private static void HandleColorChangeResult(
+        UdpPacket packet,
+        BoltConnection fromConnection)
+    {
+        if (!_clientHandshakeAccepted || !IsStateFromHost(fromConnection))
+        {
+            return;
+        }
+
+        byte version = packet.ReadByte();
+        ulong requestId = packet.ReadULong();
+        NetworkId networkId = packet.ReadNetworkId();
+        var status = (NeonLetterApplyStatus)packet.ReadByte();
+        ulong revision = packet.ReadULong();
+        uint packedColor = packet.ReadUInt();
+        if (version != NeonLetterNetworkProtocol.CurrentVersion ||
+            requestId == 0 ||
+            networkId.IsZero ||
+            (status != NeonLetterApplyStatus.Accepted &&
+                status != NeonLetterApplyStatus.Rejected))
+        {
+            return;
+        }
+
         NeonRgba color = NeonLetterNetworkProtocol.Unpack(
             version,
-            packet.ReadUInt());
-        AcceptHostColor(networkId, color);
+            packedColor);
+        NeonLetterClientApplyDecision<ulong> decision =
+            ClientApplyCoordinator.AcceptResult(
+                new NeonLetterApplyResult<ulong>(
+                    requestId,
+                    networkId.PackedValue,
+                    status,
+                    color,
+                    revision));
+        ApplyClientDecision(decision);
     }
 
     private static void HandleColorState(
         UdpPacket packet,
         BoltConnection fromConnection)
     {
-        if (!IsStateFromHost(fromConnection))
+        if (!_clientHandshakeAccepted || !IsStateFromHost(fromConnection))
         {
             return;
         }
 
         byte version = packet.ReadByte();
         NetworkId networkId = packet.ReadNetworkId();
+        ulong revision = packet.ReadULong();
         NeonRgba color = NeonLetterNetworkProtocol.Unpack(
             version,
             packet.ReadUInt());
@@ -447,10 +649,20 @@ internal static class NeonLetterMultiplayerRuntime
                 "A neon letter color state cannot use a zero network identity.");
         }
 
+        NeonLetterClientApplyDecision<ulong> decision =
+            ClientApplyCoordinator.AcceptLive(
+                networkId.PackedValue,
+                color,
+                revision);
+        if (decision.Action == NeonLetterClientApplyAction.Ignored)
+        {
+            return;
+        }
+
         SnapshotBatchCoordinator.RecordLiveColor(networkId.PackedValue);
         ReplicatedState.Receive(
             networkId.PackedValue,
-            color,
+            decision.Color,
             Time.realtimeSinceStartupAsDouble,
             IsLiveLetterIdentityCallback,
             ApplyReplicatedColorCallback);
@@ -460,9 +672,7 @@ internal static class NeonLetterMultiplayerRuntime
         UdpPacket packet,
         BoltConnection fromConnection)
     {
-        if (!BoltNetwork.isRunning ||
-            !NetUtils.IsServer ||
-            fromConnection == null)
+        if (!IsAcceptedClient(fromConnection))
         {
             return;
         }
@@ -517,7 +727,7 @@ internal static class NeonLetterMultiplayerRuntime
         UdpPacket packet,
         BoltConnection fromConnection)
     {
-        if (!IsStateFromHost(fromConnection))
+        if (!_clientHandshakeAccepted || !IsStateFromHost(fromConnection))
         {
             return;
         }
@@ -579,6 +789,13 @@ internal static class NeonLetterMultiplayerRuntime
     private static void PublishSnapshotBatch(
         IReadOnlyList<NeonLetterSnapshotEntry> entries)
     {
+        foreach (NeonLetterSnapshotEntry entry in entries)
+        {
+            ClientApplyCoordinator.SeedAuthoritative(
+                entry.Identity,
+                entry.Color);
+        }
+
         ReplicatedState.ReceiveBatch(
             entries,
             Time.realtimeSinceStartupAsDouble,
@@ -617,6 +834,11 @@ internal static class NeonLetterMultiplayerRuntime
         BoltConnection connection,
         NeonLetterSnapshotSendFrame frame)
     {
+        if (!IsAcceptedClient(connection))
+        {
+            return false;
+        }
+
         try
         {
             switch (frame.Kind)
@@ -658,6 +880,19 @@ internal static class NeonLetterMultiplayerRuntime
 
     private static void DrainPendingColors()
     {
+        if (BoltNetwork.isRunning &&
+            NetUtils.IsClient &&
+            !NetUtils.IsServer &&
+            _clientHandshakeAccepted)
+        {
+            foreach (NeonLetterClientApplyDecision<ulong> decision in
+                ClientApplyCoordinator.RejectTimedOut(
+                    Time.realtimeSinceStartupAsDouble))
+            {
+                ApplyClientDecision(decision);
+            }
+        }
+
         if (!BoltNetwork.isRunning ||
             !NetUtils.IsClient ||
             NetUtils.IsServer ||
@@ -691,6 +926,7 @@ internal static class NeonLetterMultiplayerRuntime
         SnapshotRequestScheduler.Rearm();
         SnapshotBatchCoordinator.Reset();
         SnapshotSendCoordinator.Clear();
+        ClearSessionState();
     }
 
     private static bool IsLiveLetterIdentity(ulong identity)
@@ -729,6 +965,105 @@ internal static class NeonLetterMultiplayerRuntime
             $"for network identity {identity}: {exception}");
     }
 
+    private static void ProcessHostColorRequest(
+        BoltConnection fromConnection,
+        ulong requestId,
+        NetworkId networkId,
+        NeonRgba color,
+        bool protocolAccepted)
+    {
+        if (HostApplyCoordinator.TryGetCached(
+                fromConnection,
+                requestId,
+                out NeonLetterApplyResult<ulong> cached))
+        {
+            TrySendColorResult(cached, fromConnection);
+            return;
+        }
+
+        ScrewStructure structure = null;
+        NeonLetterSmallDefinition definition = null;
+        bool isLive = requestId != 0 &&
+            protocolAccepted &&
+            !networkId.IsZero &&
+            TryResolveLiveLetter(
+                networkId,
+                out _,
+                out structure,
+                out definition);
+        if (isLive)
+        {
+            try
+            {
+                NeonLetterColorRuntime.ApplyEmission(
+                    structure.gameObject,
+                    definition,
+                    color);
+            }
+            catch (Exception exception)
+            {
+                isLive = false;
+                RLog.Error(
+                    $"[SOTFNeonLetters] Failed to apply requested color for " +
+                    $"{networkId.PackedValue}: {exception}");
+            }
+        }
+
+        int recipeId = isLive
+            ? definition.RecipeId
+            : int.MinValue;
+        NeonLetterHostApplyOutcome<ulong> outcome =
+            HostApplyCoordinator.Process(
+                fromConnection,
+                requestId,
+                networkId.PackedValue,
+                isHost: true,
+                isLive,
+                recipeId,
+                color);
+        TrySendColorResult(outcome.Result, fromConnection);
+        if (outcome.ShouldBroadcast)
+        {
+            BroadcastColorState(
+                networkId,
+                outcome.Result.AuthoritativeColor,
+                outcome.Result.Revision);
+        }
+    }
+
+    private static void TrySendColorResult(
+        NeonLetterApplyResult<ulong> result,
+        BoltConnection connection)
+    {
+        try
+        {
+            ChangeResult.SendResult(result, connection);
+        }
+        catch (Exception exception)
+        {
+            RLog.Error(
+                $"[SOTFNeonLetters] Failed to send {ChangeResult.Id} " +
+                $"request {result.RequestId} to {connection.ConnectionId}: " +
+                exception);
+        }
+    }
+
+    private static void ApplyClientDecision(
+        NeonLetterClientApplyDecision<ulong> decision)
+    {
+        if (decision.Action == NeonLetterClientApplyAction.Ignored)
+        {
+            return;
+        }
+
+        ReplicatedState.Receive(
+            decision.Identity,
+            decision.Color,
+            Time.realtimeSinceStartupAsDouble,
+            IsLiveLetterIdentityCallback,
+            ApplyReplicatedColorCallback);
+    }
+
     private static bool AcceptHostColor(NetworkId networkId, NeonRgba color)
     {
         if (!BoltNetwork.isRunning ||
@@ -764,7 +1099,10 @@ internal static class NeonLetterMultiplayerRuntime
 
         try
         {
-            ColorState.SendToClients(networkId, acceptance.AuthoritativeColor);
+            BroadcastColorState(
+                networkId,
+                acceptance.AuthoritativeColor,
+                acceptance.Revision);
         }
         catch (Exception exception)
         {
@@ -773,6 +1111,29 @@ internal static class NeonLetterMultiplayerRuntime
         }
 
         return true;
+    }
+
+    private static void BroadcastColorState(
+        NetworkId networkId,
+        NeonRgba color,
+        ulong revision)
+    {
+        if (_hostHandshakes == null)
+        {
+            return;
+        }
+
+        BoltNetwork.clients.ForEach((Action<BoltConnection>)(connection =>
+        {
+            if (_hostHandshakes.IsAccepted(connection))
+            {
+                ColorState.SendToClient(
+                    networkId,
+                    color,
+                    revision,
+                    connection);
+            }
+        }));
     }
 
     private static bool TryResolveLiveLetter(
@@ -876,161 +1237,4 @@ internal static class NeonLetterMultiplayerRuntime
             $"[SOTFNeonLetters] Failed to read {eventId}: {exception}");
     }
 
-    private sealed class ColorChangeRequestEvent : Packets.NetEvent
-    {
-        public override string Id => ChangeRequestEventId;
-
-        public override void Read(UdpPacket packet, BoltConnection fromConnection)
-        {
-            try
-            {
-                HandleColorChangeRequest(packet, fromConnection);
-            }
-            catch (Exception exception)
-            {
-                LogReadFailure(Id, exception);
-            }
-        }
-
-        public void SendRequest(NetworkId networkId, NeonRgba color)
-        {
-            Packets.EventPacket packet = NewPacket(64, GlobalTargets.OnlyServer);
-            WriteColorPayload(packet.Packet, networkId, color);
-            Send(packet);
-        }
-    }
-
-    private sealed class ColorStateEvent : Packets.NetEvent
-    {
-        public override string Id => ColorStateEventId;
-
-        public override void Read(UdpPacket packet, BoltConnection fromConnection)
-        {
-            try
-            {
-                HandleColorState(packet, fromConnection);
-            }
-            catch (Exception exception)
-            {
-                LogReadFailure(Id, exception);
-            }
-        }
-
-        public void SendToClients(NetworkId networkId, NeonRgba color)
-        {
-            Packets.EventPacket packet = NewPacket(64, GlobalTargets.AllClients);
-            WriteColorPayload(packet.Packet, networkId, color);
-            Send(packet);
-        }
-
-    }
-
-    private sealed class ColorSnapshotRequestEvent : Packets.NetEvent
-    {
-        public override string Id => SnapshotRequestEventId;
-
-        public override void Read(UdpPacket packet, BoltConnection fromConnection)
-        {
-            try
-            {
-                HandleSnapshotRequest(packet, fromConnection);
-            }
-            catch (Exception exception)
-            {
-                LogReadFailure(Id, exception);
-            }
-        }
-
-        public void SendRequest(ulong requestId)
-        {
-            Packets.EventPacket packet = NewPacket(64, GlobalTargets.OnlyServer);
-            packet.Packet.WriteByte(
-                NeonLetterSnapshotProtocol.ProtocolVersion);
-            packet.Packet.WriteULong(requestId);
-            Send(packet);
-        }
-    }
-
-    private sealed class ColorSnapshotFrameEvent : Packets.NetEvent
-    {
-        public override string Id => SnapshotFrameEventId;
-
-        public override void Read(UdpPacket packet, BoltConnection fromConnection)
-        {
-            try
-            {
-                HandleSnapshotFrame(packet, fromConnection);
-            }
-            catch (Exception exception)
-            {
-                LogReadFailure(Id, exception);
-            }
-        }
-
-        public void SendBegin(
-            ulong requestId,
-            int count,
-            BoltConnection connection)
-        {
-            Packets.EventPacket packet = NewFramePacket(
-                NeonLetterSnapshotSendFrameKind.Begin,
-                requestId,
-                connection);
-            packet.Packet.WriteInt(count);
-            Send(packet);
-        }
-
-        public void SendEntry(
-            ulong requestId,
-            int index,
-            NetworkId networkId,
-            NeonRgba color,
-            BoltConnection connection)
-        {
-            Packets.EventPacket packet = NewFramePacket(
-                NeonLetterSnapshotSendFrameKind.Entry,
-                requestId,
-                connection);
-            packet.Packet.WriteInt(index);
-            packet.Packet.WriteNetworkId(networkId);
-            packet.Packet.WriteUInt(NeonLetterNetworkProtocol.Pack(color));
-            Send(packet);
-        }
-
-        public void SendComplete(
-            ulong requestId,
-            int count,
-            BoltConnection connection)
-        {
-            Packets.EventPacket packet = NewFramePacket(
-                NeonLetterSnapshotSendFrameKind.Complete,
-                requestId,
-                connection);
-            packet.Packet.WriteInt(count);
-            Send(packet);
-        }
-
-        private Packets.EventPacket NewFramePacket(
-            NeonLetterSnapshotSendFrameKind kind,
-            ulong requestId,
-            BoltConnection connection)
-        {
-            Packets.EventPacket packet = NewPacket(64, connection);
-            packet.Packet.WriteByte(
-                NeonLetterSnapshotProtocol.ProtocolVersion);
-            packet.Packet.WriteByte((byte)kind);
-            packet.Packet.WriteULong(requestId);
-            return packet;
-        }
-    }
-
-    private static void WriteColorPayload(
-        UdpPacket packet,
-        NetworkId networkId,
-        NeonRgba color)
-    {
-        packet.WriteByte(NeonLetterNetworkProtocol.CurrentVersion);
-        packet.WriteNetworkId(networkId);
-        packet.WriteUInt(NeonLetterNetworkProtocol.Pack(color));
-    }
 }
