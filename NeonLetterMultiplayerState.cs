@@ -333,14 +333,6 @@ public sealed class NeonLetterPendingColors<TKey>
         TryEnqueue(identity, color, nowSeconds, persistent: false);
     }
 
-    internal bool TryEnqueueTransient(
-        TKey identity,
-        NeonRgba color,
-        double nowSeconds)
-    {
-        return TryEnqueue(identity, color, nowSeconds, persistent: false);
-    }
-
     internal bool TryEnqueuePersistent(
         TKey identity,
         NeonRgba color,
@@ -814,36 +806,6 @@ public sealed class NeonLetterReplicatedColorState<TKey>
             });
     }
 
-    internal bool TryReceivePersistent(
-        TKey identity,
-        NeonRgba color,
-        double nowSeconds,
-        Func<TKey, bool> isReady,
-        Action<TKey, NeonRgba> apply)
-    {
-        ArgumentNullException.ThrowIfNull(isReady);
-        ArgumentNullException.ThrowIfNull(apply);
-
-        if (!_pendingColors.TryEnqueuePersistent(
-                identity,
-                color,
-                nowSeconds))
-        {
-            return false;
-        }
-
-        _pendingColors.TryApply(
-            identity,
-            nowSeconds,
-            isReady,
-            (candidateIdentity, candidateColor) =>
-            {
-                apply(candidateIdentity, candidateColor);
-                _resolvedColors.Commit(candidateIdentity, candidateColor);
-            });
-        return true;
-    }
-
     internal bool TryReceiveAuthoritative(
         TKey identity,
         NeonRgba color,
@@ -854,7 +816,7 @@ public sealed class NeonLetterReplicatedColorState<TKey>
         ArgumentNullException.ThrowIfNull(isReady);
         ArgumentNullException.ThrowIfNull(apply);
 
-        if (!_pendingColors.TryEnqueueTransient(
+        if (!_pendingColors.TryEnqueuePersistent(
                 identity,
                 color,
                 nowSeconds))

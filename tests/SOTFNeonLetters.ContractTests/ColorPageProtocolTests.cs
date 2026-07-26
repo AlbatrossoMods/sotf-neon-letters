@@ -617,7 +617,7 @@ public sealed class ColorPageProtocolTests
         var state = new NeonLetterReplicatedColorState<ulong>(
             pendingCapacity: 2,
             pendingLifetimeSeconds: 15d);
-        state.TryReceivePersistent(
+        state.TryReceiveAuthoritative(
             identity: 1,
             Red,
             nowSeconds: 0d,
@@ -649,7 +649,7 @@ public sealed class ColorPageProtocolTests
                 (ulong)NeonLetterColorPageProtocol.MaxPendingEntries;
              identity++)
         {
-            allRetained &= state.TryReceivePersistent(
+            allRetained &= state.TryReceiveAuthoritative(
                 identity,
                 Red,
                 nowSeconds: 0d,
@@ -678,7 +678,7 @@ public sealed class ColorPageProtocolTests
             canApply: true,
             overflow,
             nowSeconds: 1d,
-            entry => state.TryReceivePersistent(
+            entry => state.TryReceiveAuthoritative(
                 entry.Identity,
                 entry.Color,
                 nowSeconds: 1d,
@@ -721,7 +721,7 @@ public sealed class ColorPageProtocolTests
         var state = new NeonLetterReplicatedColorState<ulong>(
             pendingCapacity: 1,
             pendingLifetimeSeconds: 15d);
-        state.TryReceivePersistent(
+        state.TryReceiveAuthoritative(
             identity: 1,
             Red,
             nowSeconds: 0d,
@@ -751,7 +751,7 @@ public sealed class ColorPageProtocolTests
                 entry.Identity,
                 entry.Color,
                 entry.EntityRevision,
-                decision => state.TryReceivePersistent(
+                decision => state.TryReceiveAuthoritative(
                     decision.Identity,
                     decision.Color,
                     nowSeconds: 1d,
@@ -773,7 +773,7 @@ public sealed class ColorPageProtocolTests
                 entry.Identity,
                 entry.Color,
                 entry.EntityRevision,
-                decision => state.TryReceivePersistent(
+                decision => state.TryReceiveAuthoritative(
                     decision.Identity,
                     decision.Color,
                     nowSeconds: 1d,
@@ -796,7 +796,7 @@ public sealed class ColorPageProtocolTests
         var state = new NeonLetterReplicatedColorState<ulong>(
             pendingCapacity: 1,
             pendingLifetimeSeconds: 15d);
-        state.TryReceivePersistent(
+        state.TryReceiveAuthoritative(
             identity: 1,
             Red,
             nowSeconds: 0d,
@@ -821,6 +821,147 @@ public sealed class ColorPageProtocolTests
             (
                 retained,
                 apply.ResolveAuthoritative(2).Revision,
+                state.PendingCount));
+    }
+
+    [Fact]
+    public void LiveThenEqualPageRevisionSurvivesUntilDelayedSpawn()
+    {
+        var state = new NeonLetterReplicatedColorState<ulong>(
+            pendingCapacity: 2,
+            pendingLifetimeSeconds: 15d);
+        var apply = new NeonLetterClientApplyCoordinator<ulong>(
+            timeoutSeconds: 5d);
+        bool liveRetained = apply.TryAcceptLive(
+            identity: 1,
+            Green,
+            revision: 1,
+            decision => state.TryReceiveAuthoritative(
+                decision.Identity,
+                decision.Color,
+                nowSeconds: 0d,
+                isReady: _ => false,
+                apply: (_, _) => { }));
+        bool equalPageRetained = apply.TryAcceptLive(
+            identity: 1,
+            Green,
+            revision: 1,
+            decision => state.TryReceiveAuthoritative(
+                decision.Identity,
+                decision.Color,
+                nowSeconds: 1d,
+                isReady: _ => false,
+                apply: (_, _) => { }));
+        NeonRgba applied = default;
+
+        int appliedCount = state.DrainReady(
+            nowSeconds: 10_000d,
+            maxItems: 1,
+            isReady: _ => true,
+            apply: (_, color) => applied = color,
+            onApplyError: (_, _) => { });
+
+        Assert.Equal(
+            (true, true, 1, Green, 0),
+            (
+                liveRetained,
+                equalPageRetained,
+                appliedCount,
+                applied,
+                state.PendingCount));
+    }
+
+    [Fact]
+    public void LiveOnlyAuthoritativeColorSurvivesUntilDelayedSpawn()
+    {
+        var state = new NeonLetterReplicatedColorState<ulong>(
+            pendingCapacity: 1,
+            pendingLifetimeSeconds: 15d);
+        var apply = new NeonLetterClientApplyCoordinator<ulong>(
+            timeoutSeconds: 5d);
+        bool retained = apply.TryAcceptLive(
+            identity: 1,
+            Green,
+            revision: 1,
+            decision => state.TryReceiveAuthoritative(
+                decision.Identity,
+                decision.Color,
+                nowSeconds: 0d,
+                isReady: _ => false,
+                apply: (_, _) => { }));
+        NeonRgba applied = default;
+
+        int appliedCount = state.DrainReady(
+            nowSeconds: 10_000d,
+            maxItems: 1,
+            isReady: _ => true,
+            apply: (_, color) => applied = color,
+            onApplyError: (_, _) => { });
+
+        Assert.Equal(
+            (true, 1, Green, 0),
+            (retained, appliedCount, applied, state.PendingCount));
+    }
+
+    [Fact]
+    public void FullLiveCapacityFailsClosedAndPreservesOldestState()
+    {
+        var state = new NeonLetterReplicatedColorState<ulong>(
+            NeonLetterColorPageProtocol.MaxPendingEntries,
+            pendingLifetimeSeconds: 15d);
+        var apply = new NeonLetterClientApplyCoordinator<ulong>(
+            timeoutSeconds: 5d);
+        bool allRetained = true;
+        for (ulong identity = 1;
+             identity <= NeonLetterColorPageProtocol.MaxPendingEntries;
+             identity++)
+        {
+            allRetained &= apply.TryAcceptLive(
+                identity,
+                Red,
+                revision: 1,
+                decision => state.TryReceiveAuthoritative(
+                    decision.Identity,
+                    decision.Color,
+                    nowSeconds: 0d,
+                    isReady: _ => false,
+                    apply: (_, _) => { }));
+        }
+
+        ulong overflowIdentity =
+            (ulong)NeonLetterColorPageProtocol.MaxPendingEntries + 1;
+        bool overflowRetained = apply.TryAcceptLive(
+            overflowIdentity,
+            Green,
+            revision: 1,
+            decision => state.TryReceiveAuthoritative(
+                decision.Identity,
+                decision.Color,
+                nowSeconds: 0d,
+                isReady: _ => false,
+                apply: (_, _) => { }));
+        NeonRgba oldestApplied = default;
+        int oldestAppliedCount = state.DrainReady(
+            nowSeconds: 1d,
+            maxItems: 1,
+            isReady: identity => identity == 1,
+            apply: (_, color) => oldestApplied = color,
+            onApplyError: (_, _) => { });
+
+        Assert.Equal(
+            (
+                true,
+                false,
+                0ul,
+                1,
+                Red,
+                NeonLetterColorPageProtocol.MaxPendingEntries - 1),
+            (
+                allRetained,
+                overflowRetained,
+                apply.ResolveAuthoritative(overflowIdentity).Revision,
+                oldestAppliedCount,
+                oldestApplied,
                 state.PendingCount));
     }
 
@@ -987,6 +1128,108 @@ public sealed class ColorPageProtocolTests
     }
 
     [Fact]
+    public void PageAllocationStaysBoundedForLargeAuthoritativeStores()
+    {
+        NeonLetterAuthoritativeColors<ulong> small =
+            CreateColors(NeonLetterColorPageProtocol.MaxPageEntries);
+        NeonLetterAuthoritativeColors<ulong> large =
+            CreateColors(count: 50_000);
+
+        (long AllocatedBytes, int EntryCount) smallMeasurement =
+            MeasurePageAllocation(small);
+        (long AllocatedBytes, int EntryCount) largeMeasurement =
+            MeasurePageAllocation(large);
+
+        Assert.Equal(
+            (
+                NeonLetterColorPageProtocol.MaxPageEntries,
+                NeonLetterColorPageProtocol.MaxPageEntries,
+                true),
+            (
+                smallMeasurement.EntryCount,
+                largeMeasurement.EntryCount,
+                largeMeasurement.AllocatedBytes <=
+                    smallMeasurement.AllocatedBytes + 4_096));
+    }
+
+    [Fact]
+    public void ThirtyTwoJoiningPeersKeepIndependentBoundedPages()
+    {
+        NeonLetterAuthoritativeColors<ulong> colors =
+            CreateColors(count: 1_000);
+        var host =
+            new NeonLetterColorPageHostCoordinator<int, ulong>(colors);
+        var firstPages =
+            new Dictionary<int, NeonLetterTargetedColorPage<int, ulong>>();
+        bool allTargetedAndBounded = true;
+        for (int peer = 1; peer <= 32; peer++)
+        {
+            var request = new NeonLetterColorPageRequest(
+                NeonLetterColorPageProtocol.ProtocolVersion,
+                SyncId: (ulong)peer,
+                CursorChangeSerial: 0,
+                WatermarkChangeSerial: 0);
+            bool created = host.TryCreateResponse(
+                peer,
+                canSend: true,
+                request,
+                out NeonLetterTargetedColorPage<int, ulong> delivery);
+            firstPages.Add(peer, delivery);
+            allTargetedAndBounded &=
+                created &&
+                delivery.Peer == peer &&
+                delivery.Response.Entries.Count ==
+                    NeonLetterColorPageProtocol.MaxPageEntries;
+        }
+
+        bool cursorsIndependent = true;
+        for (int peer = 1; peer <= 32; peer++)
+        {
+            NeonLetterTargetedColorPage<int, ulong> first =
+                firstPages[peer];
+            NeonLetterColorPageRequest request = peer % 2 == 0
+                ? new NeonLetterColorPageRequest(
+                    NeonLetterColorPageProtocol.ProtocolVersion,
+                    (ulong)peer,
+                    first.Response.NextCursorChangeSerial,
+                    first.Response.WatermarkChangeSerial)
+                : new NeonLetterColorPageRequest(
+                    NeonLetterColorPageProtocol.ProtocolVersion,
+                    (ulong)peer,
+                    CursorChangeSerial: 0,
+                    WatermarkChangeSerial: 0);
+            host.TryCreateResponse(
+                peer,
+                canSend: true,
+                request,
+                out NeonLetterTargetedColorPage<int, ulong> delivery);
+            cursorsIndependent &=
+                delivery.Peer == peer &&
+                delivery.Response.Sequence ==
+                    (peer % 2 == 0 ? 2ul : 1ul) &&
+                delivery.Response.Entries.Count ==
+                    NeonLetterColorPageProtocol.MaxPageEntries;
+        }
+
+        for (int peer = 2; peer <= 32; peer += 2)
+        {
+            host.Remove(peer);
+        }
+
+        (int PeerCount, int OutstandingPageCount) afterCleanup =
+            (host.PeerCount, host.OutstandingPageCount);
+        host.Clear();
+
+        Assert.Equal(
+            (true, true, (16, 16), (0, 0)),
+            (
+                allTargetedAndBounded,
+                cursorsIndependent,
+                afterCleanup,
+                (host.PeerCount, host.OutstandingPageCount)));
+    }
+
+    [Fact]
     public void WireParserRejectsNegativeEntryCountBeforeAllocation()
     {
         Assert.Throws<InvalidDataException>(
@@ -1101,6 +1344,34 @@ public sealed class ColorPageProtocolTests
 
                 return true;
             });
+    }
+
+    private static (long AllocatedBytes, int EntryCount)
+        MeasurePageAllocation(
+            NeonLetterAuthoritativeColors<ulong> colors)
+    {
+        const int Iterations = 64;
+        for (int iteration = 0; iteration < 8; iteration++)
+        {
+            colors.CreatePage(
+                cursorChangeSerial: 0,
+                watermarkChangeSerial: 0);
+        }
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        int entryCount = 0;
+        for (int iteration = 0; iteration < Iterations; iteration++)
+        {
+            NeonLetterAuthoritativeColorPage<ulong> page =
+                colors.CreatePage(
+                    cursorChangeSerial: 0,
+                    watermarkChangeSerial: 0);
+            entryCount = page.Entries.Count;
+        }
+
+        long allocated =
+            GC.GetAllocatedBytesForCurrentThread() - before;
+        return (allocated / Iterations, entryCount);
     }
 
     private static NeonLetterColorPageResponse<ulong> Response(

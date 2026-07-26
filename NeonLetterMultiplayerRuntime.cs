@@ -813,7 +813,7 @@ internal static partial class NeonLetterMultiplayerRuntime
     private static bool RetainPagedDecision(
         NeonLetterClientApplyDecision<ulong> decision)
     {
-        return ReplicatedState.TryReceivePersistent(
+        return ReplicatedState.TryReceiveAuthoritative(
             decision.Identity,
             decision.Color,
             Time.realtimeSinceStartupAsDouble,
