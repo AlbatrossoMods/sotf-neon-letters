@@ -34,7 +34,7 @@ public sealed class ContractTests
         CheckMultiplayerNativeRestoreCoordinatorContract();
         CheckMultiplayerRestoreFailureIsolationContract();
         CheckMultiplayerRestoreRoleContract();
-        CheckMultiplayerRestoreReadinessTimeoutContract();
+        CheckMultiplayerRestoreReadinessContract();
         CheckColorPersistenceContract();
         CheckExtendedSymbolRuntimePolicyContract();
         CheckColorRestoreContract();
@@ -2493,12 +2493,10 @@ void CheckMultiplayerRestoreRoleContract()
         "world exit resets multiplayer restore role discovery");
 }
 
-void CheckMultiplayerRestoreReadinessTimeoutContract()
+void CheckMultiplayerRestoreReadinessContract()
 {
     int recipeId = NeonLetterSmallCatalog.Get('L').RecipeId;
-    double readinessWindow =
-        NeonLetterMultiplayerRestoreCoordinator<string>
-            .ReadinessTimeoutSeconds;
+    const double arbitraryDelaySeconds = 1_000_000d;
 
     NeonLetterMultiplayerSaveEntry Entry(int nativeSaveId)
     {
@@ -2543,33 +2541,15 @@ void CheckMultiplayerRestoreReadinessTimeoutContract()
     }
 
     AdvanceUnchanged(100d);
-    AdvanceUnchanged(100d + readinessWindow - 0.001d);
+    AdvanceUnchanged(100d + arbitraryDelaySeconds);
     CheckEqual(
         1,
         unchangedCoordinator.PendingCount,
-        "an unchanged unavailable restore stage remains pending before its deadline");
+        "an unchanged unavailable restore stage remains pending after an arbitrary delay");
     CheckEqual(
         0,
         unchangedErrors.Count,
-        "an unavailable restore stage reports no error before its deadline");
-
-    AdvanceUnchanged(100d + readinessWindow);
-    Exception? unchangedTimeout = unchangedErrors.SingleOrDefault();
-    CheckEqual(
-        0,
-        unchangedCoordinator.PendingCount,
-        "an unchanged unavailable restore stage is removed at its deadline");
-    CheckEqual(
-        true,
-        unchangedTimeout is TimeoutException,
-        "an unchanged unavailable restore stage reports a timeout");
-    CheckEqual(
-        true,
-        unchangedTimeout?.Message.Contains(
-                nameof(NeonLetterMultiplayerRestoreObservationKind
-                    .ProcessedRecipeUnavailable),
-                StringComparison.Ordinal) == true,
-        "a readiness timeout identifies its unchanged restore stage");
+        "an unavailable restore stage reports no elapsed-time error");
 
     var temporaryCoordinator = HostCoordinator(Entry(2));
     var temporaryRestores = new List<int>();
@@ -2584,7 +2564,7 @@ void CheckMultiplayerRestoreReadinessTimeoutContract()
         onEntryError: (_, exception) =>
             failures.Add($"unexpected temporary readiness error: {exception.Message}"));
     temporaryCoordinator.Advance(
-        nowSeconds: 200d + readinessWindow - 0.001d,
+        nowSeconds: 200d + arbitraryDelaySeconds,
         observe: (_, _, _) =>
             new NeonLetterMultiplayerRestoreObservation<string>(
                 NeonLetterMultiplayerRestoreObservationKind.NativeTargetReady,
@@ -2601,7 +2581,7 @@ void CheckMultiplayerRestoreReadinessTimeoutContract()
     CheckSequence(
         new[] { 2 },
         temporaryRestores,
-        "temporary unavailability that becomes ready before timeout restores normally");
+        "temporary unavailability that becomes ready later restores normally");
     CheckEqual(
         0,
         temporaryCoordinator.PendingCount,
@@ -2637,43 +2617,40 @@ void CheckMultiplayerRestoreReadinessTimeoutContract()
     AdvanceTransition(300d);
     transitionKind =
         NeonLetterMultiplayerRestoreObservationKind.ReadyToSpawnFallback;
-    AdvanceTransition(300d + readinessWindow);
+    AdvanceTransition(300d + arbitraryDelaySeconds);
     CheckEqual(
         1,
         transitionFallbackStarts,
-        "progress at the prior deadline can start fallback exactly once");
+        "delayed readiness progress can start fallback exactly once");
 
     transitionKind =
         NeonLetterMultiplayerRestoreObservationKind.FallbackTargetUnavailable;
-    AdvanceTransition(300d + readinessWindow);
-    AdvanceTransition(300d + readinessWindow * 2d - 0.001d);
+    AdvanceTransition(300d + arbitraryDelaySeconds);
+    AdvanceTransition(300d + arbitraryDelaySeconds * 2d);
     CheckEqual(
         1,
         transitionCoordinator.PendingCount,
-        "fallback attachment receives a fresh readiness window after recipe progress");
+        "fallback attachment remains pending across arbitrary delay");
     CheckEqual(
         1,
         transitionFallbackStarts,
         "time advances while awaiting attachment cannot duplicate fallback spawn");
 
-    AdvanceTransition(300d + readinessWindow * 2d);
-    AdvanceTransition(300d + readinessWindow * 2d + 1d);
-    Exception? transitionTimeout = transitionErrors.SingleOrDefault();
+    transitionKind =
+        NeonLetterMultiplayerRestoreObservationKind.FallbackTargetReady;
+    AdvanceTransition(300d + arbitraryDelaySeconds * 3d);
     CheckEqual(
         0,
         transitionCoordinator.PendingCount,
-        "an unchanged fallback attachment stage is removed at its reset deadline");
+        "a fallback that attaches after an arbitrary delay restores normally");
     CheckEqual(
         1,
         transitionFallbackStarts,
-        "a timed-out fallback entry never starts a second fallback");
+        "a delayed fallback entry never starts a second fallback");
     CheckEqual(
-        true,
-        transitionTimeout?.Message.Contains(
-                nameof(NeonLetterMultiplayerRestoreObservationKind
-                    .FallbackTargetUnavailable),
-                StringComparison.Ordinal) == true,
-        "the reset attachment timeout identifies the fallback readiness stage");
+        0,
+        transitionErrors.Count,
+        "delayed fallback attachment reports no elapsed-time error");
 
     var continuingCoordinator = HostCoordinator(Entry(11), Entry(12));
     var continuingErrors = new List<int>();
@@ -2689,7 +2666,7 @@ void CheckMultiplayerRestoreReadinessTimeoutContract()
         onEntryError: (entry, _) =>
             continuingErrors.Add(entry.NativeSaveId));
     continuingCoordinator.Advance(
-        nowSeconds: 400d + readinessWindow,
+        nowSeconds: 400d + arbitraryDelaySeconds,
         observe: (entry, _, _) => entry.NativeSaveId == 11
             ? new NeonLetterMultiplayerRestoreObservation<string>(
                 NeonLetterMultiplayerRestoreObservationKind
@@ -2707,17 +2684,17 @@ void CheckMultiplayerRestoreReadinessTimeoutContract()
         onEntryError: (entry, _) =>
             continuingErrors.Add(entry.NativeSaveId));
     CheckSequence(
-        new[] { 11 },
+        Array.Empty<int>(),
         continuingErrors,
-        "one timed-out entry reports only its own restore error");
+        "an unavailable entry reports no elapsed-time restore error");
     CheckSequence(
         new[] { 12 },
         continuingRestores,
-        "a later ready entry restores in the same pass after an earlier timeout");
+        "a ready entry restores while an earlier entry remains unavailable");
     CheckEqual(
-        0,
+        1,
         continuingCoordinator.PendingCount,
-        "timeout isolation leaves no completed entries pending");
+        "the unavailable entry stays pending while the ready entry completes");
 
     var invalidStagedCoordinator =
         new NeonLetterMultiplayerRestoreCoordinator<string>();
@@ -2823,24 +2800,24 @@ void CheckMultiplayerRestoreReadinessTimeoutContract()
     }
 
     AdvanceRoleReset(600d);
-    AdvanceRoleReset(600d + readinessWindow - 0.001d);
+    AdvanceRoleReset(600d + arbitraryDelaySeconds);
     roleResetCoordinator.SetRole(NeonLetterMultiplayerRestoreRole.Host);
-    AdvanceRoleReset(600d + readinessWindow);
-    AdvanceRoleReset(600d + readinessWindow * 2d - 0.001d);
+    AdvanceRoleReset(600d + arbitraryDelaySeconds * 2d);
+    AdvanceRoleReset(600d + arbitraryDelaySeconds * 3d);
     CheckEqual(
         1,
         roleResetCoordinator.PendingCount,
-        "setting restore role resets an entry readiness window");
+        "setting restore role preserves pending readiness");
     CheckEqual(
         0,
         roleResetErrors.Count,
-        "a reset role readiness window reports no early timeout");
+        "role updates cannot create elapsed-time readiness errors");
 
-    AdvanceRoleReset(600d + readinessWindow * 2d);
+    AdvanceRoleReset(600d + arbitraryDelaySeconds * 4d);
     CheckEqual(
-        0,
+        1,
         roleResetCoordinator.PendingCount,
-        "an unchanged stage times out at the reset role deadline");
+        "an unchanged stage remains pending after another arbitrary delay");
 }
 
 void CheckColorPersistenceContract()
@@ -3888,6 +3865,41 @@ void CheckColorRuntimeSafetyContract()
         true,
         source.Contains("SOTFNeonLettersUi.Open(target)", StringComparison.Ordinal),
         "a valid E-key target opens the color editor");
+    CheckEqual(
+        true,
+        source.Contains(
+            "NeonLetterRestoreReadinessScheduler",
+            StringComparison.Ordinal),
+        "single-player restore uses readiness tokens and bounded safety probes");
+    CheckEqual(
+        true,
+        source.Contains("HasWorkForToken", StringComparison.Ordinal),
+        "single-player idle updates skip parked restore entries");
+
+    string multiplayerSaveRuntimePath =
+        FindRepositoryFile("NeonLetterMultiplayerSaveRuntime.cs")
+        ?? throw new InvalidOperationException(
+            "Could not find the multiplayer save runtime adapter.");
+    string multiplayerSaveRuntimeSource =
+        File.ReadAllText(multiplayerSaveRuntimePath);
+    CheckEqual(
+        true,
+        multiplayerSaveRuntimeSource.Contains(
+            "NeonLetterRestoreReadinessScheduler",
+            StringComparison.Ordinal),
+        "multiplayer restore uses readiness tokens and bounded safety probes");
+    CheckEqual(
+        true,
+        multiplayerSaveRuntimeSource.Contains(
+            "HasWorkForToken",
+            StringComparison.Ordinal),
+        "multiplayer idle updates skip parked restore entries");
+    CheckEqual(
+        true,
+        multiplayerSaveRuntimeSource.Contains(
+            "readinessToken:",
+            StringComparison.Ordinal),
+        "multiplayer runtime advances token-scoped restore waves");
 
     string uiPath = FindRepositoryFile("SOTFNeonLettersUi.cs")
         ?? throw new InvalidOperationException("Could not find the color editor UI adapter.");

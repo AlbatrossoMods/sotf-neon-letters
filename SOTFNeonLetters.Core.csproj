@@ -23,6 +23,7 @@
         <Compile Include="NeonLetterFallbackRollbackPolicy.cs" />
         <Compile Include="NeonLetterColorPageSync.cs" />
         <Compile Include="NeonLetterColorPersistencePolicy.cs" />
+        <Compile Include="NeonLetterRestoreReadinessScheduler.cs" />
         <Compile Include="NeonLetterSinglePlayerRestoreCoordinator.cs" />
         <Compile Include="NeonLetterRuntimePolicy.cs" />
         <Compile Include="NeonLetterDismantleRefundPolicy.cs" />

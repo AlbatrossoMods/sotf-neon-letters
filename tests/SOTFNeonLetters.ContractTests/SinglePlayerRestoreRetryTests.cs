@@ -96,14 +96,14 @@ public sealed class SinglePlayerRestoreRetryTests
     }
 
     [Fact]
-    public void PendingRestoreExpiresAtExactlyFifteenSeconds()
+    public void PendingRestoreSurvivesArbitraryDelay()
     {
         var coordinator = new NeonLetterSinglePlayerRestoreCoordinator();
         long epoch = coordinator.Stage(CreateEnvelope(1), nowSeconds: 20d);
         int attemptCount = 0;
         coordinator.Advance(
             epoch,
-            nowSeconds: 34.999d,
+            nowSeconds: 20d,
             _ =>
             {
                 attemptCount++;
@@ -113,14 +113,14 @@ public sealed class SinglePlayerRestoreRetryTests
 
         coordinator.Advance(
             epoch,
-            nowSeconds: 35d,
+            nowSeconds: 1_000_000d,
             _ =>
             {
                 attemptCount++;
                 return NeonLetterSinglePlayerRestoreAttemptResult.Applied;
             });
 
-        Assert.Equal((1, 0), (attemptCount, coordinator.PendingCount));
+        Assert.Equal((2, 0), (attemptCount, coordinator.PendingCount));
     }
 
     [Fact]

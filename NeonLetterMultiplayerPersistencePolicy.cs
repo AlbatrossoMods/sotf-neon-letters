@@ -137,8 +137,6 @@ public readonly record struct NeonLetterMultiplayerRestoreObservation<TTarget>(
 public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
     where TTarget : class
 {
-    public const double ReadinessTimeoutSeconds = 15d;
-
     private readonly LinkedList<PendingRestore> _pending = new();
     private readonly NeonLetterReentrantSnapshotPool<
         LinkedListNode<PendingRestore>> _snapshotPool =
@@ -148,11 +146,25 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
     private NeonLetterMultiplayerRestoreRole _role;
     private bool _hasStagedEnvelope;
     private int _startedFallbackCount;
+    private ulong _readinessToken;
+    private int _readinessWaveAttemptsRemaining;
 
     public NeonLetterMultiplayerRestoreRole Role => _role;
     public bool HasStagedEnvelope => _hasStagedEnvelope;
     public int PendingCount => _pending.Count;
     public int StartedFallbackCount => _startedFallbackCount;
+
+    /// <summary>
+    /// Returns whether the current host restore has entries left for a token.
+    /// </summary>
+    public bool HasWorkForToken(ulong readinessToken)
+    {
+        ValidateReadinessToken(readinessToken);
+        return _role == NeonLetterMultiplayerRestoreRole.Host &&
+               _pending.Count > 0 &&
+               (readinessToken != _readinessToken ||
+                _readinessWaveAttemptsRemaining > 0);
+    }
 
     public void Stage(NeonLetterMultiplayerSaveEnvelope? envelope)
     {
@@ -168,7 +180,6 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
 
     public void SetRole(NeonLetterMultiplayerRestoreRole role)
     {
-        ResetPendingReadiness();
         _role = role;
         RollbackFallbacks(ApplyRoleToLoadedState());
     }
@@ -212,32 +223,84 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         Action<NeonLetterMultiplayerSaveEntry, Exception> onEntryError)
     {
         ValidateNowSeconds(nowSeconds);
-        if (maxItems < 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(maxItems),
-                maxItems,
-                "Restore item budget cannot be negative.");
-        }
-
-        if (maxFallbackSpawns < 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(maxFallbackSpawns),
-                maxFallbackSpawns,
-                "Restore fallback-spawn budget cannot be negative.");
-        }
+        ValidateBudgets(maxItems, maxFallbackSpawns);
 
         ArgumentNullException.ThrowIfNull(observe);
         ArgumentNullException.ThrowIfNull(startFallback);
         ArgumentNullException.ThrowIfNull(applyRestored);
         ArgumentNullException.ThrowIfNull(onEntryError);
 
+        AdvanceCore(
+            readinessToken: null,
+            maxItems,
+            maxFallbackSpawns,
+            observe,
+            startFallback,
+            applyRestored,
+            onEntryError);
+    }
+
+    /// <summary>
+    /// Advances one bounded slice of the entries woken by a readiness token.
+    /// </summary>
+    public void AdvanceForReadinessToken(
+        ulong readinessToken,
+        int maxItems,
+        int maxFallbackSpawns,
+        Func<NeonLetterMultiplayerSaveEntry, bool, TTarget?,
+            NeonLetterMultiplayerRestoreObservation<TTarget>> observe,
+        Func<NeonLetterMultiplayerSaveEntry, TTarget> startFallback,
+        Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored,
+        Action<NeonLetterMultiplayerSaveEntry, Exception> onEntryError)
+    {
+        ValidateReadinessToken(readinessToken);
+        ValidateBudgets(maxItems, maxFallbackSpawns);
+
+        ArgumentNullException.ThrowIfNull(observe);
+        ArgumentNullException.ThrowIfNull(startFallback);
+        ArgumentNullException.ThrowIfNull(applyRestored);
+        ArgumentNullException.ThrowIfNull(onEntryError);
+
+        AdvanceCore(
+            readinessToken,
+            maxItems,
+            maxFallbackSpawns,
+            observe,
+            startFallback,
+            applyRestored,
+            onEntryError);
+    }
+
+    private void AdvanceCore(
+        ulong? readinessToken,
+        int maxItems,
+        int maxFallbackSpawns,
+        Func<NeonLetterMultiplayerSaveEntry, bool, TTarget?,
+            NeonLetterMultiplayerRestoreObservation<TTarget>> observe,
+        Func<NeonLetterMultiplayerSaveEntry, TTarget> startFallback,
+        Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored,
+        Action<NeonLetterMultiplayerSaveEntry, Exception> onEntryError)
+    {
         if (_role != NeonLetterMultiplayerRestoreRole.Host ||
             _pending.Count == 0 ||
             maxItems == 0)
         {
             return;
+        }
+
+        if (readinessToken.HasValue)
+        {
+            if (readinessToken.Value != _readinessToken)
+            {
+                _readinessToken = readinessToken.Value;
+                _readinessWaveAttemptsRemaining = _pending.Count;
+            }
+
+            maxItems = Math.Min(maxItems, _readinessWaveAttemptsRemaining);
+            if (maxItems == 0)
+            {
+                return;
+            }
         }
 
         LinkedListNode<PendingRestore>? node =
@@ -267,6 +330,16 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
             _nextPending = node;
             foreach (LinkedListNode<PendingRestore> currentNode in snapshot)
             {
+                if (readinessToken.HasValue)
+                {
+                    if (readinessToken.Value != _readinessToken)
+                    {
+                        break;
+                    }
+
+                    _readinessWaveAttemptsRemaining--;
+                }
+
                 PendingRestore pending = currentNode.Value;
                 try
                 {
@@ -279,7 +352,6 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                         currentNode,
                         pending,
                         observation,
-                        nowSeconds,
                         maxFallbackSpawns,
                         ref fallbackSpawns,
                         observe,
@@ -315,7 +387,6 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         LinkedListNode<PendingRestore> node,
         PendingRestore pending,
         NeonLetterMultiplayerRestoreObservation<TTarget> observation,
-        double nowSeconds,
         int maxFallbackSpawns,
         ref int fallbackSpawns,
         Func<NeonLetterMultiplayerSaveEntry, bool, TTarget?,
@@ -331,10 +402,6 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
             case NeonLetterMultiplayerRestoreObservationKind.NativeRecipeUnavailable:
             case NeonLetterMultiplayerRestoreObservationKind.NativeTargetUnavailable:
             case NeonLetterMultiplayerRestoreObservationKind.FallbackTargetUnavailable:
-                TrackReadinessOrThrow(
-                    pending,
-                    observation.Kind,
-                    nowSeconds);
                 break;
 
             case NeonLetterMultiplayerRestoreObservationKind.NativeRecipeMismatch:
@@ -359,12 +426,10 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                     node,
                     pending,
                     observation,
-                    applyRestored,
-                    nowSeconds);
+                    applyRestored);
                 break;
 
             case NeonLetterMultiplayerRestoreObservationKind.ReadyToSpawnFallback:
-                pending.ResetReadiness();
                 if (fallbackSpawns >= maxFallbackSpawns)
                 {
                     break;
@@ -385,7 +450,6 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                             node,
                             pending,
                             finalObservation,
-                            nowSeconds,
                             maxFallbackSpawns,
                             ref fallbackSpawns,
                             observe,
@@ -430,8 +494,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         LinkedListNode<PendingRestore> node,
         PendingRestore pending,
         NeonLetterMultiplayerRestoreObservation<TTarget> observation,
-        Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored,
-        double nowSeconds)
+        Func<NeonLetterMultiplayerSaveEntry, TTarget, bool> applyRestored)
     {
         if (observation.Target == null)
         {
@@ -442,13 +505,7 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         if (applyRestored(pending.Entry, observation.Target))
         {
             RemovePending(node);
-            return;
         }
-
-        TrackReadinessOrThrow(
-            pending,
-            observation.Kind,
-            nowSeconds);
     }
 
     private OwnedFallback? RemovePending(
@@ -477,28 +534,6 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         return node.Value.TakeOwnedFallback();
     }
 
-    private static void TrackReadinessOrThrow(
-        PendingRestore pending,
-        NeonLetterMultiplayerRestoreObservationKind observationKind,
-        double nowSeconds)
-    {
-        if (pending.ReadinessObservationKind != observationKind)
-        {
-            pending.BeginReadiness(observationKind, nowSeconds);
-            return;
-        }
-
-        if (nowSeconds - pending.ReadinessStartedAtSeconds <
-            ReadinessTimeoutSeconds)
-        {
-            return;
-        }
-
-        throw new TimeoutException(
-            $"Multiplayer neon restore readiness stage {observationKind} " +
-            $"remained unchanged for {ReadinessTimeoutSeconds} seconds.");
-    }
-
     private static void ValidateNowSeconds(double nowSeconds)
     {
         if (!double.IsFinite(nowSeconds) || nowSeconds < 0d)
@@ -507,6 +542,38 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
                 nameof(nowSeconds),
                 nowSeconds,
                 "Restore time must be finite and non-negative.");
+        }
+    }
+
+    private static void ValidateReadinessToken(ulong readinessToken)
+    {
+        if (readinessToken == 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(readinessToken),
+                readinessToken,
+                "The readiness token must be non-zero.");
+        }
+    }
+
+    private static void ValidateBudgets(
+        int maxItems,
+        int maxFallbackSpawns)
+    {
+        if (maxItems < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxItems),
+                maxItems,
+                "Restore item budget cannot be negative.");
+        }
+
+        if (maxFallbackSpawns < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maxFallbackSpawns),
+                maxFallbackSpawns,
+                "Restore fallback-spawn budget cannot be negative.");
         }
     }
 
@@ -567,6 +634,8 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         _pending.Clear();
         _nextPending = null;
         _startedFallbackCount = 0;
+        _readinessToken = 0;
+        _readinessWaveAttemptsRemaining = 0;
 
         return ownedFallbacks;
     }
@@ -585,14 +654,6 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         }
     }
 
-    private void ResetPendingReadiness()
-    {
-        foreach (PendingRestore pending in _pending)
-        {
-            pending.ResetReadiness();
-        }
-    }
-
     private sealed class PendingRestore
     {
         private OwnedFallback? _ownedFallback;
@@ -606,23 +667,6 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         public NeonLetterMultiplayerSaveEntry Entry { get; }
         public NeonLetterMultiplayerRestoreEntryState State { get; }
         public TTarget? SpawnedTarget { get; set; }
-        public NeonLetterMultiplayerRestoreObservationKind?
-            ReadinessObservationKind { get; private set; }
-        public double ReadinessStartedAtSeconds { get; private set; }
-
-        public void BeginReadiness(
-            NeonLetterMultiplayerRestoreObservationKind observationKind,
-            double nowSeconds)
-        {
-            ReadinessObservationKind = observationKind;
-            ReadinessStartedAtSeconds = nowSeconds;
-        }
-
-        public void ResetReadiness()
-        {
-            ReadinessObservationKind = null;
-            ReadinessStartedAtSeconds = 0d;
-        }
 
         public void ArmFallback(
             TTarget target,

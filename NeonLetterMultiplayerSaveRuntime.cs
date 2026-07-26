@@ -26,6 +26,8 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
     private readonly NeonLetterMultiplayerRestoreCoordinator<RestoreTarget>
         _restoreCoordinator = new();
+    private readonly NeonLetterRestoreReadinessScheduler<
+        MultiplayerRestoreProgress> _restoreReadiness = new();
     private readonly Dictionary<int, RestoreTarget> _nativeTargets = new();
     private readonly Dictionary<int, StructureRecipe> _processedRecipes = new();
     private readonly Func<
@@ -37,6 +39,8 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         _startFallback;
     private bool _afterLoadSaveReceived;
     private bool _afterSpawnReceived;
+    private long _restoreSignalGeneration;
+    private long _restoreUpdateTick;
 
     private NeonLetterMultiplayerSaveRuntime()
     {
@@ -145,6 +149,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
     public void Load(NeonLetterMultiplayerSaveEnvelope obj)
     {
         _restoreCoordinator.Stage(obj);
+        SignalRestoreProgress();
         ResolveKnownNetworkRole();
     }
 
@@ -233,20 +238,19 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
     private void OnAfterLoadSave()
     {
         _afterLoadSaveReceived = true;
-        AdvanceRestore();
+        SignalRestoreProgress();
     }
 
     private void OnAfterSpawn()
     {
         _afterSpawnReceived = true;
+        SignalRestoreProgress();
         if (!BoltNetwork.isRunning)
         {
             _restoreCoordinator.SetRole(
                 NeonLetterMultiplayerRestoreRole.SinglePlayer);
             return;
         }
-
-        AdvanceRestore();
     }
 
     private void OnInWorldUpdate()
@@ -261,6 +265,9 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         _processedRecipes.Clear();
         _afterLoadSaveReceived = false;
         _afterSpawnReceived = false;
+        _restoreReadiness.Reset();
+        _restoreSignalGeneration = 0;
+        _restoreUpdateTick = 0;
     }
 
     private void AdvanceRestore()
@@ -275,16 +282,24 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         {
             if (_afterSpawnReceived)
             {
-                _restoreCoordinator.SetRole(
-                    NeonLetterMultiplayerRestoreRole.SinglePlayer);
+                if (_restoreCoordinator.Role !=
+                    NeonLetterMultiplayerRestoreRole.SinglePlayer)
+                {
+                    _restoreCoordinator.SetRole(
+                        NeonLetterMultiplayerRestoreRole.SinglePlayer);
+                }
             }
             return;
         }
 
         if (NetUtils.IsClient && !NetUtils.IsServer)
         {
-            _restoreCoordinator.SetRole(
-                NeonLetterMultiplayerRestoreRole.Client);
+            if (_restoreCoordinator.Role !=
+                NeonLetterMultiplayerRestoreRole.Client)
+            {
+                _restoreCoordinator.SetRole(
+                    NeonLetterMultiplayerRestoreRole.Client);
+            }
             return;
         }
 
@@ -301,25 +316,112 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         }
         if (_restoreCoordinator.PendingCount == 0 ||
             !_afterLoadSaveReceived ||
-            !_afterSpawnReceived ||
-            !ScrewStructureManager.TryGetInstance(
-                out ScrewStructureManager manager) ||
-            manager._structures == null ||
-            manager._isLoadingSave)
+            !_afterSpawnReceived)
         {
             return;
         }
 
-        RefreshProcessedRecipes();
-        _restoreCoordinator.Advance(
-            Time.realtimeSinceStartupAsDouble,
-            MaxRestoreItemsPerTick,
-            MaxFallbackSpawnsPerTick,
-            _observeRestore,
-            _startFallback,
-            ApplyRestoredColorCallback,
-            LogRestoreErrorCallback);
+        bool managerAvailable =
+            ScrewStructureManager.TryGetInstance(
+                out ScrewStructureManager manager) &&
+            manager._structures != null;
+        bool managerLoading =
+            managerAvailable && manager._isLoadingSave;
+        MultiplayerRestoreProgress progress = CaptureRestoreProgress(
+            managerAvailable,
+            managerLoading,
+            managerAvailable ? manager._structures.Count : -1);
+        ulong currentToken = _restoreReadiness.CurrentToken;
+        bool waveActive =
+            currentToken != 0 &&
+            _restoreCoordinator.HasWorkForToken(currentToken);
+        long updateTick = NextRestoreUpdateTick();
+        bool tokenChanged = _restoreReadiness.TryGetDueToken(
+            progress,
+            updateTick,
+            waveActive,
+            out ulong readinessToken);
+        if (!managerAvailable || managerLoading)
+        {
+            return;
+        }
+
+        if (tokenChanged)
+        {
+            int processedRecipeCount = _processedRecipes.Count;
+            RefreshProcessedRecipes();
+            if (_processedRecipes.Count != processedRecipeCount)
+            {
+                progress = CaptureRestoreProgress(
+                    managerAvailable,
+                    managerLoading,
+                    manager._structures.Count);
+                _restoreReadiness.TryGetDueToken(
+                    progress,
+                    updateTick,
+                    waveActive: false,
+                    out readinessToken);
+            }
+        }
+
+        if (!tokenChanged &&
+            !_restoreCoordinator.HasWorkForToken(readinessToken))
+        {
+            return;
+        }
+
+        _restoreCoordinator.AdvanceForReadinessToken(
+            readinessToken: readinessToken,
+            maxItems: MaxRestoreItemsPerTick,
+            maxFallbackSpawns: MaxFallbackSpawnsPerTick,
+            observe: _observeRestore,
+            startFallback: _startFallback,
+            applyRestored: ApplyRestoredColorCallback,
+            onEntryError: LogRestoreErrorCallback);
     }
+
+    private MultiplayerRestoreProgress CaptureRestoreProgress(
+        bool managerAvailable,
+        bool managerLoading,
+        int structureCount)
+    {
+        return new MultiplayerRestoreProgress(
+            _restoreSignalGeneration,
+            _restoreCoordinator.Role,
+            managerAvailable,
+            managerLoading,
+            structureCount,
+            _processedRecipes.Count,
+            _restoreCoordinator.StartedFallbackCount);
+    }
+
+    private long NextRestoreUpdateTick()
+    {
+        long updateTick = _restoreUpdateTick;
+        if (_restoreUpdateTick < long.MaxValue)
+        {
+            _restoreUpdateTick++;
+        }
+
+        return updateTick;
+    }
+
+    private void SignalRestoreProgress()
+    {
+        unchecked
+        {
+            _restoreSignalGeneration++;
+        }
+    }
+
+    private readonly record struct MultiplayerRestoreProgress(
+        long SignalGeneration,
+        NeonLetterMultiplayerRestoreRole Role,
+        bool ManagerAvailable,
+        bool IsLoadingSave,
+        int StructureCount,
+        int ProcessedRecipeCount,
+        int StartedFallbackCount);
 
     private void ResolveKnownNetworkRole()
     {

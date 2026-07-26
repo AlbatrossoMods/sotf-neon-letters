@@ -169,7 +169,7 @@ public sealed class FallbackRollbackRegressionTests
     }
 
     [Fact]
-    public void FallbackReadinessTimeoutRollsBackTheOwnedTarget()
+    public void FallbackReservationSurvivesArbitraryAttachmentDelay()
     {
         NeonLetterMultiplayerRestoreCoordinator<RestoreTarget> coordinator =
             CreateCoordinator();
@@ -183,13 +183,40 @@ public sealed class FallbackRollbackRegressionTests
         AdvanceUnavailableFallback(coordinator, nowSeconds: 1d, errors);
         AdvanceUnavailableFallback(
             coordinator,
-            1d + NeonLetterMultiplayerRestoreCoordinator<RestoreTarget>
-                .ReadinessTimeoutSeconds,
+            nowSeconds: 1_000_000d,
             errors);
+        int applyCount = 0;
+        uint appliedPackedColor = 0;
+
+        coordinator.Advance(
+            nowSeconds: 1_000_001d,
+            observe: (_, _, target) =>
+                new NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
+                    NeonLetterMultiplayerRestoreObservationKind
+                        .FallbackTargetReady,
+                    target),
+            startFallback: _ => throw new InvalidOperationException(),
+            applyRestored: (entry, _) =>
+            {
+                applyCount++;
+                appliedPackedColor = entry.PackedColor;
+                return true;
+            },
+            onEntryError: (_, exception) => errors.Add(exception));
 
         Assert.Equal(
-            (1, typeof(TimeoutException), 0),
-            (rollbackCount, errors.Single().GetType(), coordinator.PendingCount));
+            (
+                0,
+                0,
+                1,
+                NeonLetterNetworkProtocol.Pack(NeonRgba.ProjectCyan),
+                0),
+            (
+                rollbackCount,
+                errors.Count,
+                applyCount,
+                appliedPackedColor,
+                coordinator.PendingCount));
     }
 
     [Fact]

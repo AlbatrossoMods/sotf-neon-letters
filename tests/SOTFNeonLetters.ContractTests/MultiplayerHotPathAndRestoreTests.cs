@@ -1131,7 +1131,7 @@ public sealed class MultiplayerHotPathAndRestoreTests
     }
 
     [Fact]
-    public void DeferredFallbackClearsThePriorReadinessDeadline()
+    public void PendingReadinessDoesNotExpireAfterArbitraryDelay()
     {
         NeonLetterMultiplayerSaveEntry entry = CreateEntry(0);
         var coordinator =
@@ -1163,13 +1163,7 @@ public sealed class MultiplayerHotPathAndRestoreTests
             NeonLetterMultiplayerRestoreObservationKind
                 .ProcessedRecipeUnavailable);
         Advance(
-            NeonLetterMultiplayerRestoreCoordinator<string>
-                .ReadinessTimeoutSeconds,
-            NeonLetterMultiplayerRestoreObservationKind
-                .ReadyToSpawnFallback);
-        Advance(
-            NeonLetterMultiplayerRestoreCoordinator<string>
-                .ReadinessTimeoutSeconds,
+            nowSeconds: 1_000_000d,
             NeonLetterMultiplayerRestoreObservationKind
                 .ProcessedRecipeUnavailable);
 
@@ -1291,7 +1285,7 @@ public sealed class MultiplayerHotPathAndRestoreTests
     }
 
     [Fact]
-    public void FailedReadyApplyUsesTheReadinessTimeout()
+    public void FailedReadyApplyRemainsPendingAcrossArbitraryDelay()
     {
         NeonLetterMultiplayerRestoreCoordinator<string> coordinator =
             CreateCoordinator(1);
@@ -1314,13 +1308,11 @@ public sealed class MultiplayerHotPathAndRestoreTests
         }
 
         Advance(nowSeconds: 0d);
-        Advance(
-            NeonLetterMultiplayerRestoreCoordinator<string>
-                .ReadinessTimeoutSeconds);
+        Advance(nowSeconds: 1_000_000d);
 
         Assert.Equal(
-            (typeof(TimeoutException), 0),
-            (errors.Single().GetType(), coordinator.PendingCount));
+            (0, 1),
+            (errors.Count, coordinator.PendingCount));
     }
 
     [Fact]

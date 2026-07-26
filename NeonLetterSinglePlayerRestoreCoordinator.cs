@@ -89,7 +89,6 @@ internal static class NeonLetterSinglePlayerRestoreAttemptPolicy
 internal sealed class NeonLetterSinglePlayerRestoreCoordinator
 {
     internal const int MaxAttemptsPerTick = 16;
-    internal const double RestoreDeadlineSeconds = 15d;
 
     private static readonly IReadOnlySet<int> KnownRecipeIds =
         NeonLetterSmallCatalog.All
@@ -102,8 +101,9 @@ internal sealed class NeonLetterSinglePlayerRestoreCoordinator
         LinkedListNode<NeonLetterColorSaveEntry>> _pendingBySaveId = new();
     private LinkedListNode<NeonLetterColorSaveEntry>? _nextPending;
     private double _startedAtSeconds;
-    private double _deadlineSeconds;
     private long _epoch;
+    private ulong _readinessToken;
+    private int _readinessWaveAttemptsRemaining;
 
     internal int PendingCount => _pending.Count;
 
@@ -112,18 +112,8 @@ internal sealed class NeonLetterSinglePlayerRestoreCoordinator
         double nowSeconds)
     {
         ValidateNowSeconds(nowSeconds);
-        double deadlineSeconds = nowSeconds + RestoreDeadlineSeconds;
-        if (!double.IsFinite(deadlineSeconds))
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(nowSeconds),
-                nowSeconds,
-                "Restore deadline must be finite.");
-        }
-
         BeginNextEpoch();
         _startedAtSeconds = nowSeconds;
-        _deadlineSeconds = deadlineSeconds;
         if (envelope == null ||
             envelope.Version != NeonLetterColorSaveEnvelope.CurrentVersion ||
             envelope.Entries == null)
@@ -163,7 +153,93 @@ internal sealed class NeonLetterSinglePlayerRestoreCoordinator
     {
         BeginNextEpoch();
         _startedAtSeconds = 0d;
-        _deadlineSeconds = 0d;
+    }
+
+    internal bool HasWorkForToken(long epoch, ulong readinessToken)
+    {
+        ValidateReadinessToken(readinessToken);
+        return epoch == _epoch &&
+               _pending.Count > 0 &&
+               (readinessToken != _readinessToken ||
+                _readinessWaveAttemptsRemaining > 0);
+    }
+
+    internal int Advance(
+        long epoch,
+        ulong readinessToken,
+        Func<
+            NeonLetterColorSaveEntry,
+            NeonLetterSinglePlayerRestoreAttemptResult> attempt)
+    {
+        ValidateReadinessToken(readinessToken);
+        ArgumentNullException.ThrowIfNull(attempt);
+
+        if (epoch != _epoch || _pending.Count == 0)
+        {
+            return 0;
+        }
+
+        if (readinessToken != _readinessToken)
+        {
+            _readinessToken = readinessToken;
+            _readinessWaveAttemptsRemaining = _pending.Count;
+        }
+
+        int attemptsRemaining = Math.Min(
+            MaxAttemptsPerTick,
+            Math.Min(_readinessWaveAttemptsRemaining, _pending.Count));
+        if (attemptsRemaining == 0)
+        {
+            return 0;
+        }
+
+        int appliedCount = 0;
+        while (attemptsRemaining > 0 &&
+               _pending.Count > 0 &&
+               _readinessWaveAttemptsRemaining > 0)
+        {
+            LinkedListNode<NeonLetterColorSaveEntry> current =
+                _nextPending?.List == _pending
+                    ? _nextPending
+                    : _pending.First!;
+            LinkedListNode<NeonLetterColorSaveEntry>? next =
+                current.Next ?? _pending.First;
+            long attemptedEpoch = _epoch;
+            _nextPending = next;
+            attemptsRemaining--;
+            _readinessWaveAttemptsRemaining--;
+            NeonLetterSinglePlayerRestoreAttemptResult result =
+                attempt(current.Value);
+
+            if (attemptedEpoch != _epoch ||
+                epoch != _epoch ||
+                readinessToken != _readinessToken ||
+                current.List != _pending)
+            {
+                return appliedCount;
+            }
+
+            switch (result)
+            {
+                case NeonLetterSinglePlayerRestoreAttemptResult.Applied:
+                    appliedCount++;
+                    RemovePending(current, next);
+                    break;
+
+                case NeonLetterSinglePlayerRestoreAttemptResult.Terminal:
+                    RemovePending(current, next);
+                    break;
+
+                case NeonLetterSinglePlayerRestoreAttemptResult.TargetUnavailable:
+                    break;
+
+                default:
+                    throw new InvalidOperationException(
+                        $"Unsupported single-player restore result {result}.");
+            }
+        }
+
+        return appliedCount;
     }
 
     internal int Advance(
@@ -187,12 +263,6 @@ internal sealed class NeonLetterSinglePlayerRestoreCoordinator
                 nameof(nowSeconds),
                 nowSeconds,
                 "Restore time cannot precede the staged start time.");
-        }
-
-        if (nowSeconds >= _deadlineSeconds)
-        {
-            ClearPending();
-            return 0;
         }
 
         int appliedCount = 0;
@@ -256,6 +326,8 @@ internal sealed class NeonLetterSinglePlayerRestoreCoordinator
         _pending.Clear();
         _pendingBySaveId.Clear();
         _nextPending = null;
+        _readinessToken = 0;
+        _readinessWaveAttemptsRemaining = 0;
     }
 
     private void RemovePending(
@@ -287,6 +359,17 @@ internal sealed class NeonLetterSinglePlayerRestoreCoordinator
                 nameof(nowSeconds),
                 nowSeconds,
                 "Restore time must be finite and non-negative.");
+        }
+    }
+
+    private static void ValidateReadinessToken(ulong readinessToken)
+    {
+        if (readinessToken == 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(readinessToken),
+                readinessToken,
+                "The readiness token must be non-zero.");
         }
     }
 }
@@ -338,6 +421,26 @@ internal sealed class NeonLetterSinglePlayerRestoreLifecycle
         }
 
         return _coordinator.Advance(_epoch, nowSeconds, attempt);
+    }
+
+    internal bool HasWorkForToken(ulong readinessToken)
+    {
+        return _isSinglePlayer &&
+               _coordinator.HasWorkForToken(_epoch, readinessToken);
+    }
+
+    internal int Advance(
+        ulong readinessToken,
+        Func<
+            NeonLetterColorSaveEntry,
+            NeonLetterSinglePlayerRestoreAttemptResult> attempt)
+    {
+        if (!_isSinglePlayer)
+        {
+            return 0;
+        }
+
+        return _coordinator.Advance(_epoch, readinessToken, attempt);
     }
 
     internal void OnWorldExited()

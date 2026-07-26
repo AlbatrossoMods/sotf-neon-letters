@@ -18,6 +18,8 @@ public static class NeonLetterColorRuntime
     private static readonly NeonLetterLifecycleCoordinator Lifecycle = new();
     private static readonly NeonLetterSinglePlayerRestoreLifecycle
         RestoreLifecycle = new();
+    private static readonly NeonLetterRestoreReadinessScheduler<
+        SinglePlayerRestoreProgress> RestoreReadiness = new();
     private static readonly Func<
         NeonLetterColorSaveEntry,
         NeonLetterSinglePlayerRestoreAttemptResult>
@@ -31,6 +33,8 @@ public static class NeonLetterColorRuntime
             IsStructureRootAlive,
             CreateEmissionBinding);
     private static bool _initialized;
+    private static long _restoreSignalGeneration;
+    private static long _restoreUpdateTick;
 
     public static void Initialize()
     {
@@ -53,19 +57,20 @@ public static class NeonLetterColorRuntime
                     "the neon color editor cannot be opened.");
             }
 
-            SdkEvents.OnAfterSpawn.Subscribe(QueuePersistentColorRestore);
+            SdkEvents.OnAfterSpawn.Subscribe(
+                SignalPersistentColorReadiness);
             Lifecycle.CompleteStage(
                 () => SdkEvents.OnAfterSpawn.Unsubscribe(
-                    QueuePersistentColorRestore));
+                    SignalPersistentColorReadiness));
 
             SdkEvents.OnWorldExited.Subscribe(OnWorldExited);
             Lifecycle.CompleteStage(
                 () => SdkEvents.OnWorldExited.Unsubscribe(OnWorldExited));
 
-            SdkEvents.AfterLoadSave.Subscribe(QueuePersistentColorRestore);
+            SdkEvents.AfterLoadSave.Subscribe(StagePersistentColorRestore);
             Lifecycle.CompleteStage(
                 () => SdkEvents.AfterLoadSave.Unsubscribe(
-                    QueuePersistentColorRestore));
+                    StagePersistentColorRestore));
 
             SdkEvents.OnInWorldUpdate.Subscribe(AdvancePersistentColorRestore);
             Lifecycle.CompleteStage(
@@ -94,6 +99,7 @@ public static class NeonLetterColorRuntime
         PersistentColors.Clear();
         EmissionBindings.Clear();
         RestoreLifecycle.Deinitialize();
+        ResetRestoreReadiness();
     }
 
     internal static NeonRgba ResolveSessionColor(int instanceId)
@@ -257,19 +263,49 @@ public static class NeonLetterColorRuntime
         return true;
     }
 
-    private static void QueuePersistentColorRestore()
+    private static void StagePersistentColorRestore()
     {
         RestoreLifecycle.SetSinglePlayerRole(IsSinglePlayerRole());
         RestoreLifecycle.Stage(
             PersistentColors.Save(),
             Time.realtimeSinceStartupAsDouble);
+        SignalRestoreProgress();
+    }
+
+    private static void SignalPersistentColorReadiness()
+    {
+        RestoreLifecycle.SetSinglePlayerRole(IsSinglePlayerRole());
+        SignalRestoreProgress();
     }
 
     private static void AdvancePersistentColorRestore()
     {
-        RestoreLifecycle.SetSinglePlayerRole(IsSinglePlayerRole());
+        bool isSinglePlayer = IsSinglePlayerRole();
+        RestoreLifecycle.SetSinglePlayerRole(isSinglePlayer);
+        if (RestoreLifecycle.PendingCount == 0)
+        {
+            return;
+        }
+
+        SinglePlayerRestoreProgress progress =
+            CaptureRestoreProgress(isSinglePlayer);
+        ulong currentToken = RestoreReadiness.CurrentToken;
+        bool waveActive =
+            currentToken != 0 &&
+            RestoreLifecycle.HasWorkForToken(currentToken);
+        bool tokenChanged = RestoreReadiness.TryGetDueToken(
+            progress,
+            NextRestoreUpdateTick(),
+            waveActive,
+            out ulong readinessToken);
+        if (!tokenChanged &&
+            !RestoreLifecycle.HasWorkForToken(readinessToken))
+        {
+            return;
+        }
+
         RestoreLifecycle.Advance(
-            Time.realtimeSinceStartupAsDouble,
+            readinessToken,
             TryRestorePersistentColorCallback);
     }
 
@@ -289,8 +325,57 @@ public static class NeonLetterColorRuntime
             PersistentColors.Clear();
             EmissionBindings.Clear();
             RestoreLifecycle.OnWorldExited();
+            ResetRestoreReadiness();
         }
     }
+
+    private static SinglePlayerRestoreProgress CaptureRestoreProgress(
+        bool isSinglePlayer)
+    {
+        bool managerAvailable =
+            ScrewStructureManager.TryGetInstance(
+                out ScrewStructureManager manager) &&
+            manager._structures != null;
+        return new SinglePlayerRestoreProgress(
+            _restoreSignalGeneration,
+            isSinglePlayer,
+            managerAvailable,
+            managerAvailable && manager._isLoadingSave,
+            managerAvailable ? manager._structures.Count : -1);
+    }
+
+    private static long NextRestoreUpdateTick()
+    {
+        long updateTick = _restoreUpdateTick;
+        if (_restoreUpdateTick < long.MaxValue)
+        {
+            _restoreUpdateTick++;
+        }
+
+        return updateTick;
+    }
+
+    private static void SignalRestoreProgress()
+    {
+        unchecked
+        {
+            _restoreSignalGeneration++;
+        }
+    }
+
+    private static void ResetRestoreReadiness()
+    {
+        RestoreReadiness.Reset();
+        _restoreSignalGeneration = 0;
+        _restoreUpdateTick = 0;
+    }
+
+    private readonly record struct SinglePlayerRestoreProgress(
+        long SignalGeneration,
+        bool IsSinglePlayer,
+        bool ManagerAvailable,
+        bool IsLoadingSave,
+        int StructureCount);
 
     private static NeonLetterSinglePlayerRestoreAttemptResult
         TryRestorePersistentColor(NeonLetterColorSaveEntry entry)
