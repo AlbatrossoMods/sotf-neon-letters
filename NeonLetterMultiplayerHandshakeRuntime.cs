@@ -271,7 +271,13 @@ internal static partial class NeonLetterMultiplayerRuntime
 
         if (status == NeonLetterHandshakeStatus.Accepted)
         {
-            ClientSession.Accept();
+            if (!ClientSession.TryAccept(
+                    canAccept: !DeferredClientDisconnects.IsQuarantined(
+                        ClientDisconnectKey)))
+            {
+                return;
+            }
+
             HelloScheduler.Clear();
             RLog.Msg(
                 "[SOTFNeonLetters] Multiplayer protocol handshake accepted.");

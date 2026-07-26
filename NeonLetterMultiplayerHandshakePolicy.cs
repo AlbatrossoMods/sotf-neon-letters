@@ -259,6 +259,12 @@ internal sealed class NeonLetterClientSessionGate
         IsAccepted = true;
     }
 
+    public bool TryAccept(bool canAccept)
+    {
+        IsAccepted = canAccept;
+        return canAccept;
+    }
+
     public void Reject()
     {
         IsAccepted = false;

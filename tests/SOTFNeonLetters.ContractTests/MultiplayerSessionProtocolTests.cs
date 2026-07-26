@@ -439,6 +439,58 @@ public sealed class MultiplayerSessionProtocolTests
     }
 
     [Fact]
+    public void DelayedAcceptedResultCannotReopenQuarantinedClientTraffic()
+    {
+        const byte clientKey = 0;
+        var session = new NeonLetterClientSessionGate();
+        var deferred = new NeonLetterDeferredDisconnects<byte>();
+        int disconnectAttempts = 0;
+        int disconnectLogs = 0;
+        int trafficActions = 0;
+        session.BeginSession(() => { }, () => { });
+        deferred.Schedule(clientKey);
+        deferred.Drain(
+            exists: _ => true,
+            execute: _ =>
+            {
+                disconnectAttempts++;
+                throw new InvalidOperationException("disconnect failed");
+            },
+            onFirstFailure: (_, _) => disconnectLogs++);
+
+        bool accepted = session.TryAccept(
+            canAccept: !deferred.IsQuarantined(clientKey));
+        bool snapshotRan = session.TryRun(() => trafficActions++);
+        bool colorResultRan = session.TryRun(() => trafficActions++);
+        bool liveStateRan = session.TryRun(() => trafficActions++);
+        bool pendingRan = session.TryRun(() => trafficActions++);
+
+        Assert.Equal(
+            (
+                1,
+                1,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                0),
+            (
+                disconnectAttempts,
+                disconnectLogs,
+                deferred.IsQuarantined(clientKey),
+                accepted,
+                session.IsAccepted,
+                snapshotRan,
+                colorResultRan,
+                liveStateRan,
+                pendingRan,
+                trafficActions));
+    }
+
+    [Fact]
     public void FatalRoleSetupFailureBlocksAdvanceAndSpawnUntilLifecycleReset()
     {
         var gate = new NeonLetterRoleSetupGate();
