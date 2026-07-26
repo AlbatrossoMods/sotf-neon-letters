@@ -72,7 +72,6 @@ internal static partial class NeonLetterMultiplayerRuntime
             _hostHandshakes.Remove(connection);
             HostApplyCoordinator.Remove(connection);
             ColorPageHostCoordinator.Remove(connection);
-            ColorPageResponseScheduler.Remove(connection);
         }
 
         foreach (BoltConnection connection in
@@ -423,7 +422,6 @@ internal static partial class NeonLetterMultiplayerRuntime
     {
         _hostHandshakes?.Clear();
         HostApplyCoordinator.Clear();
-        ColorPageResponseScheduler.Clear();
         if (beginClientSession)
         {
             ClientSession.BeginSession(

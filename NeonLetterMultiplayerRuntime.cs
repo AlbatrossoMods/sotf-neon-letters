@@ -50,9 +50,6 @@ internal static partial class NeonLetterMultiplayerRuntime
     private static readonly NeonLetterColorPageHostCoordinator<
         BoltConnection,
         ulong> ColorPageHostCoordinator = new(AuthoritativeColors);
-    private static readonly NeonLetterColorPageResponseScheduler<
-        BoltConnection,
-        ulong> ColorPageResponseScheduler = new();
     private static readonly NeonLetterColorPageClientCoordinator<ulong>
         ColorPageClientCoordinator = new();
     private static readonly NeonLetterLifecycleCoordinator Lifecycle = new();
@@ -175,7 +172,6 @@ internal static partial class NeonLetterMultiplayerRuntime
         AuthoritativeColors.Clear();
         HostApplyCoordinator.Clear();
         ColorPageHostCoordinator.Clear();
-        ColorPageResponseScheduler.Clear();
         ColorPageClientCoordinator.Clear();
         ClearSessionState();
     }
@@ -470,7 +466,6 @@ internal static partial class NeonLetterMultiplayerRuntime
         {
             _colorPageRequestRegistered = false;
             ColorPageHostCoordinator.Clear();
-            ColorPageResponseScheduler.Clear();
         }
     }
 
@@ -729,41 +724,33 @@ internal static partial class NeonLetterMultiplayerRuntime
             packet.ReadULong(),
             packet.ReadULong(),
             packet.ReadULong());
-        if (!ColorPageHostCoordinator.TryCreateResponse(
+        NeonLetterColorPageScheduleResult result =
+            ColorPageHostCoordinator.TryScheduleRequest(
                 fromConnection,
-                canSend: IsAcceptedForModTraffic(fromConnection),
-                request,
-                out NeonLetterTargetedColorPage<
-                    BoltConnection,
-                    ulong> delivery))
+                canSchedule: IsAcceptedForModTraffic(fromConnection),
+                request);
+        if (result !=
+            NeonLetterColorPageScheduleResult.CapacityExceeded)
         {
             return;
         }
 
-        if (!IsAcceptedClient(delivery.Peer))
-        {
-            return;
-        }
-
-        if (!ColorPageResponseScheduler.TrySchedule(delivery))
-        {
-            ScheduleFailedColorPageConnection(
-                delivery.Peer,
-                new InvalidOperationException(
-                    "The pending color page peer limit was reached."));
-        }
+        ScheduleFailedColorPageConnection(
+            fromConnection,
+            new InvalidOperationException(
+                "The pending color page peer limit was reached."));
     }
 
     private static void DrainColorPageResponses()
     {
         if (!BoltNetwork.isRunning ||
             !NetUtils.IsServer ||
-            ColorPageResponseScheduler.PendingCount == 0)
+            ColorPageHostCoordinator.PendingRequestCount == 0)
         {
             return;
         }
 
-        ColorPageResponseScheduler.Drain(
+        ColorPageHostCoordinator.DrainScheduledRequests(
             IsAcceptedForModTrafficCallback,
             SendColorPageDeliveryCallback,
             ScheduleFailedColorPageCallback);
@@ -1155,8 +1142,9 @@ internal static partial class NeonLetterMultiplayerRuntime
 
     private static void QuarantineHostConnection(BoltConnection connection)
     {
-        ColorPageResponseScheduler.Remove(connection);
-        DeferredDisconnects.Schedule(connection);
+        ColorPageHostCoordinator.Quarantine(
+            connection,
+            DeferredDisconnects.Schedule);
     }
 
     private static bool TryResolveLiveLetter(

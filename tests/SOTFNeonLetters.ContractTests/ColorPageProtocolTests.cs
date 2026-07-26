@@ -311,59 +311,254 @@ public sealed class ColorPageProtocolTests
     }
 
     [Fact]
-    public void ThousandDuplicateDeliveriesCoalesceBeforeOneUpdateDrain()
+    public void PeerRequestFloodCreatesOnePageOnlyDuringDrainAndRetryReusesIt()
     {
-        var scheduler =
-            new NeonLetterColorPageResponseScheduler<int, ulong>();
-        NeonLetterTargetedColorPage<int, ulong> delivery =
-            CreateDelivery(peer: 1);
-        bool allScheduled = true;
+        NeonLetterAuthoritativeColors<ulong> colors = CreateColors(count: 65);
+        int pageCreations = 0;
+        var host = new NeonLetterColorPageHostCoordinator<int, ulong>(
+            colors,
+            (cursor, watermark) =>
+            {
+                pageCreations++;
+                return colors.CreatePage(cursor, watermark);
+            });
+        var firstRequest = new NeonLetterColorPageRequest(
+            NeonLetterColorPageProtocol.ProtocolVersion,
+            SyncId: 1,
+            CursorChangeSerial: 0,
+            WatermarkChangeSerial: 0);
+        var scheduleResults =
+            new List<NeonLetterColorPageScheduleResult>();
+        for (ulong syncId = 1; syncId <= 1_000; syncId++)
+        {
+            scheduleResults.Add(
+                host.TryScheduleRequest(
+                    peer: 1,
+                    canSchedule: true,
+                    firstRequest with { SyncId = syncId }));
+        }
+
+        (int PageCreations, int PendingCount) beforeDrain =
+            (pageCreations, host.PendingRequestCount);
+        var responses = new List<NeonLetterColorPageResponse<ulong>>();
+        int firstSent = host.DrainScheduledRequests(
+            canSend: _ => true,
+            send: delivery => responses.Add(delivery.Response),
+            onFailure: (_, _) => { });
+        host.TryScheduleRequest(
+            peer: 1,
+            canSchedule: true,
+            firstRequest);
+        int retrySent = host.DrainScheduledRequests(
+            canSend: _ => true,
+            send: delivery => responses.Add(delivery.Response),
+            onFailure: (_, _) => { });
+
+        Assert.Equal(
+            (
+                1,
+                999,
+                (0, 1),
+                1,
+                1,
+                1,
+                2,
+                responses[0]),
+            (
+                scheduleResults.Count(
+                    result =>
+                        result ==
+                        NeonLetterColorPageScheduleResult.Scheduled),
+                scheduleResults.Count(
+                    result =>
+                        result ==
+                        NeonLetterColorPageScheduleResult.Rejected),
+                beforeDrain,
+                firstSent,
+                retrySent,
+                pageCreations,
+                responses.Count,
+                responses[1]));
+    }
+
+    [Fact]
+    public void ManyPeersCreateAtMostFourPagesPerUpdateInFifoOrder()
+    {
+        NeonLetterAuthoritativeColors<ulong> colors = CreateColors(count: 1);
+        int pageCreations = 0;
+        var host = new NeonLetterColorPageHostCoordinator<int, ulong>(
+            colors,
+            (cursor, watermark) =>
+            {
+                pageCreations++;
+                return colors.CreatePage(cursor, watermark);
+            });
+        for (int peer = 1; peer <= 10; peer++)
+        {
+            host.TryScheduleRequest(
+                peer,
+                canSchedule: true,
+                new NeonLetterColorPageRequest(
+                    NeonLetterColorPageProtocol.ProtocolVersion,
+                    SyncId: (ulong)peer,
+                    CursorChangeSerial: 0,
+                    WatermarkChangeSerial: 0));
+        }
+
+        var sentPeers = new List<int>();
+        int firstSent = host.DrainScheduledRequests(
+            _ => true,
+            delivery => sentPeers.Add(delivery.Peer),
+            (_, _) => { });
+        (int Creations, int Pending) afterFirst =
+            (pageCreations, host.PendingRequestCount);
+        int secondSent = host.DrainScheduledRequests(
+            _ => true,
+            delivery => sentPeers.Add(delivery.Peer),
+            (_, _) => { });
+
+        Assert.Equal(
+            (4, (4, 6), 4, 8, "1,2,3,4,5,6,7,8"),
+            (
+                firstSent,
+                afterFirst,
+                secondSent,
+                pageCreations,
+                string.Join(",", sentPeers)));
+    }
+
+    [Fact]
+    public void QuarantineDropsPendingPageAndSchedulesPeerDisconnect()
+    {
+        NeonLetterAuthoritativeColors<ulong> colors = CreateColors(count: 1);
+        var host =
+            new NeonLetterColorPageHostCoordinator<int, ulong>(colors);
+        host.TryScheduleRequest(
+            peer: 1,
+            canSchedule: true,
+            new NeonLetterColorPageRequest(
+                NeonLetterColorPageProtocol.ProtocolVersion,
+                SyncId: 1,
+                CursorChangeSerial: 0,
+                WatermarkChangeSerial: 0));
+        var quarantinedPeers = new List<int>();
+
+        host.Quarantine(1, quarantinedPeers.Add);
+        int sent = host.DrainScheduledRequests(
+            _ => true,
+            _ => throw new InvalidOperationException(
+                "A quarantined page must not be sent."),
+            (_, _) => { });
+
+        Assert.Equal(
+            ("1", 0, 0),
+            (
+                string.Join(",", quarantinedPeers),
+                sent,
+                host.PendingRequestCount));
+    }
+
+    [Fact]
+    public void DisconnectAndSessionCleanupRemoveQueuedAndCachedPageState()
+    {
+        NeonLetterAuthoritativeColors<ulong> colors = CreateColors(count: 1);
+        var host =
+            new NeonLetterColorPageHostCoordinator<int, ulong>(colors);
+        var request = new NeonLetterColorPageRequest(
+            NeonLetterColorPageProtocol.ProtocolVersion,
+            SyncId: 1,
+            CursorChangeSerial: 0,
+            WatermarkChangeSerial: 0);
+        host.TryScheduleRequest(peer: 1, canSchedule: true, request);
+        host.DrainScheduledRequests(_ => true, _ => { }, (_, _) => { });
+        host.TryScheduleRequest(peer: 1, canSchedule: true, request);
+        host.TryScheduleRequest(
+            peer: 2,
+            canSchedule: true,
+            request with { SyncId = 2 });
+
+        host.Remove(peer: 1);
+        (int PeerCount, int PendingCount) afterDisconnect =
+            (host.PeerCount, host.PendingRequestCount);
+        host.Clear();
+
+        Assert.Equal(
+            ((0, 1), (0, 0)),
+            (
+                afterDisconnect,
+                (host.PeerCount, host.PendingRequestCount)));
+    }
+
+    [Fact]
+    public void ThousandDuplicateRequestsCoalesceBeforeOneUpdateDrain()
+    {
+        NeonLetterAuthoritativeColors<ulong> colors = CreateColors(count: 1);
+        var host =
+            new NeonLetterColorPageHostCoordinator<int, ulong>(colors);
+        NeonLetterColorPageRequest request = CreateInitialRequest(syncId: 1);
+        var scheduleResults =
+            new List<NeonLetterColorPageScheduleResult>();
         int serialized = 0;
         for (int duplicate = 0; duplicate < 1_000; duplicate++)
         {
-            allScheduled &= scheduler.TrySchedule(delivery);
+            scheduleResults.Add(
+                host.TryScheduleRequest(
+                    peer: 1,
+                    canSchedule: true,
+                    request));
         }
 
-        int pendingBeforeDrain = scheduler.PendingCount;
+        int pendingBeforeDrain = host.PendingRequestCount;
         int serializedBeforeDrain = serialized;
-        int sent = scheduler.Drain(
+        int sent = host.DrainScheduledRequests(
             canSend: _ => true,
             send: _ => serialized++,
             onFailure: (_, _) => { });
 
         Assert.Equal(
-            (true, 1, 0, 1, 1, 0),
+            (1, 999, 1, 0, 1, 1, 0),
             (
-                allScheduled,
+                scheduleResults.Count(
+                    result =>
+                        result ==
+                        NeonLetterColorPageScheduleResult.Scheduled),
+                scheduleResults.Count(
+                    result =>
+                        result ==
+                        NeonLetterColorPageScheduleResult.Coalesced),
                 pendingBeforeDrain,
                 serializedBeforeDrain,
                 sent,
                 serialized,
-                scheduler.PendingCount));
+                host.PendingRequestCount));
     }
 
     [Fact]
     public void PageDeliveryDrainIsFairAndGloballyBoundedPerUpdate()
     {
-        var scheduler =
-            new NeonLetterColorPageResponseScheduler<int, ulong>();
+        NeonLetterAuthoritativeColors<ulong> colors = CreateColors(count: 1);
+        var host =
+            new NeonLetterColorPageHostCoordinator<int, ulong>(colors);
         for (int peer = 1; peer <= 10; peer++)
         {
-            scheduler.TrySchedule(CreateDelivery(peer));
+            host.TryScheduleRequest(
+                peer,
+                canSchedule: true,
+                CreateInitialRequest((ulong)peer));
         }
 
         var sentPeers = new List<int>();
-        int first = scheduler.Drain(
+        int first = host.DrainScheduledRequests(
             _ => true,
             delivery => sentPeers.Add(delivery.Peer),
             (_, _) => { });
-        int pendingAfterFirst = scheduler.PendingCount;
-        int second = scheduler.Drain(
+        int pendingAfterFirst = host.PendingRequestCount;
+        int second = host.DrainScheduledRequests(
             _ => true,
             delivery => sentPeers.Add(delivery.Peer),
             (_, _) => { });
-        int pendingAfterSecond = scheduler.PendingCount;
-        int third = scheduler.Drain(
+        int pendingAfterSecond = host.PendingRequestCount;
+        int third = host.DrainScheduledRequests(
             _ => true,
             delivery => sentPeers.Add(delivery.Peer),
             (_, _) => { });
@@ -388,50 +583,55 @@ public sealed class ColorPageProtocolTests
     [Fact]
     public void ExactRetryScheduledDuringSendWaitsForNextUpdate()
     {
-        var scheduler =
-            new NeonLetterColorPageResponseScheduler<int, ulong>();
-        NeonLetterTargetedColorPage<int, ulong> delivery =
-            CreateDelivery(peer: 1);
-        scheduler.TrySchedule(delivery);
-        int serialized = 0;
+        NeonLetterAuthoritativeColors<ulong> colors = CreateColors(count: 1);
+        var host =
+            new NeonLetterColorPageHostCoordinator<int, ulong>(colors);
+        NeonLetterColorPageRequest request = CreateInitialRequest(syncId: 1);
+        host.TryScheduleRequest(peer: 1, canSchedule: true, request);
+        var responses = new List<NeonLetterColorPageResponse<ulong>>();
 
-        int first = scheduler.Drain(
+        int first = host.DrainScheduledRequests(
             _ => true,
-            sent =>
+            delivery =>
             {
-                serialized++;
-                scheduler.TrySchedule(sent);
+                responses.Add(delivery.Response);
+                host.TryScheduleRequest(
+                    delivery.Peer,
+                    canSchedule: true,
+                    request);
             },
             (_, _) => { });
-        int pendingAfterFirst = scheduler.PendingCount;
-        int second = scheduler.Drain(
+        int pendingAfterFirst = host.PendingRequestCount;
+        int second = host.DrainScheduledRequests(
             _ => true,
-            _ => serialized++,
+            delivery => responses.Add(delivery.Response),
             (_, _) => { });
 
         Assert.Equal(
-            (1, 1, 1, 1, 2, 0),
+            (1, 1, 1, 2, 0, responses[0]),
             (
                 first,
                 pendingAfterFirst,
-                serialized - second,
                 second,
-                serialized,
-                scheduler.PendingCount));
+                responses.Count,
+                host.PendingRequestCount,
+                responses[1]));
     }
 
     [Fact]
     public void FailedPageSendDoesNotBlockLaterPeers()
     {
-        var scheduler =
-            new NeonLetterColorPageResponseScheduler<int, ulong>();
-        scheduler.TrySchedule(CreateDelivery(peer: 1));
-        scheduler.TrySchedule(CreateDelivery(peer: 2));
-        scheduler.TrySchedule(CreateDelivery(peer: 3));
+        NeonLetterAuthoritativeColors<ulong> colors = CreateColors(count: 1);
+        var host =
+            new NeonLetterColorPageHostCoordinator<int, ulong>(colors);
+        host.TryScheduleRequest(1, true, CreateInitialRequest(syncId: 1));
+        host.TryScheduleRequest(2, true, CreateInitialRequest(syncId: 2));
+        host.TryScheduleRequest(3, true, CreateInitialRequest(syncId: 3));
         var sentPeers = new List<int>();
         var failedPeers = new List<int>();
+        var quarantinedPeers = new List<int>();
 
-        int sent = scheduler.Drain(
+        int sent = host.DrainScheduledRequests(
             _ => true,
             delivery =>
             {
@@ -442,62 +642,93 @@ public sealed class ColorPageProtocolTests
 
                 sentPeers.Add(delivery.Peer);
             },
-            (peer, _) => failedPeers.Add(peer));
+            (peer, _) =>
+            {
+                failedPeers.Add(peer);
+                host.Quarantine(peer, quarantinedPeers.Add);
+            });
 
         Assert.Equal(
-            (2, "1,3", "2", 0),
+            (2, "1,3", "2", "2", 0, 2),
             (
                 sent,
                 string.Join(",", sentPeers),
                 string.Join(",", failedPeers),
-                scheduler.PendingCount));
+                string.Join(",", quarantinedPeers),
+                host.PendingRequestCount,
+                host.PeerCount));
     }
 
     [Fact]
     public void QuarantineDisconnectAndSessionCleanupBoundPendingPages()
     {
-        var scheduler =
-            new NeonLetterColorPageResponseScheduler<int, ulong>();
-        scheduler.TrySchedule(CreateDelivery(peer: 1));
-        scheduler.TrySchedule(CreateDelivery(peer: 2));
-        scheduler.Remove(peer: 1);
+        NeonLetterAuthoritativeColors<ulong> colors = CreateColors(count: 1);
+        var host =
+            new NeonLetterColorPageHostCoordinator<int, ulong>(colors);
+        host.TryScheduleRequest(1, true, CreateInitialRequest(syncId: 1));
+        host.TryScheduleRequest(2, true, CreateInitialRequest(syncId: 2));
+        host.Remove(peer: 1);
         var sentPeers = new List<int>();
 
-        int sent = scheduler.Drain(
+        int sent = host.DrainScheduledRequests(
             canSend: peer => peer != 2,
             send: delivery => sentPeers.Add(delivery.Peer),
             onFailure: (_, _) => { });
-        scheduler.TrySchedule(CreateDelivery(peer: 3));
-        scheduler.Clear();
+        host.TryScheduleRequest(3, true, CreateInitialRequest(syncId: 3));
+        host.Clear();
 
         Assert.Equal(
-            (0, string.Empty, 0),
-            (sent, string.Join(",", sentPeers), scheduler.PendingCount));
+            (0, string.Empty, 0, 0),
+            (
+                sent,
+                string.Join(",", sentPeers),
+                host.PendingRequestCount,
+                host.PeerCount));
     }
 
     [Fact]
     public void HostilePendingPeerCountFailsClosedAtNamedMaximum()
     {
-        var scheduler =
-            new NeonLetterColorPageResponseScheduler<int, ulong>();
+        NeonLetterAuthoritativeColors<ulong> colors = CreateColors(count: 1);
+        var host =
+            new NeonLetterColorPageHostCoordinator<int, ulong>(colors);
         bool allWithinLimit = true;
         for (int peer = 1;
              peer <= NeonLetterColorPageDeliveryProtocol.MaxPendingPeers;
              peer++)
         {
-            allWithinLimit &= scheduler.TrySchedule(CreateDelivery(peer));
+            allWithinLimit &=
+                host.TryScheduleRequest(
+                    peer,
+                    canSchedule: true,
+                    CreateInitialRequest((ulong)peer)) ==
+                NeonLetterColorPageScheduleResult.Scheduled;
         }
 
-        bool overflow = scheduler.TrySchedule(
-            CreateDelivery(
-                NeonLetterColorPageDeliveryProtocol.MaxPendingPeers + 1));
+        NeonLetterColorPageScheduleResult overflow =
+            host.TryScheduleRequest(
+                NeonLetterColorPageDeliveryProtocol.MaxPendingPeers + 1,
+                canSchedule: true,
+                CreateInitialRequest(
+                    (ulong)NeonLetterColorPageDeliveryProtocol
+                        .MaxPendingPeers + 1));
+        NeonLetterColorPageScheduleResult existing =
+            host.TryScheduleRequest(
+                peer: 1,
+                canSchedule: true,
+                CreateInitialRequest(syncId: 1));
 
         Assert.Equal(
             (
                 true,
-                false,
+                NeonLetterColorPageScheduleResult.CapacityExceeded,
+                NeonLetterColorPageScheduleResult.Coalesced,
                 NeonLetterColorPageDeliveryProtocol.MaxPendingPeers),
-            (allWithinLimit, overflow, scheduler.PendingCount));
+            (
+                allWithinLimit,
+                overflow,
+                existing,
+                host.PendingRequestCount));
     }
 
     [Fact]
@@ -1271,7 +1502,7 @@ public sealed class ColorPageProtocolTests
                     "ColorPageResponseEvent",
                     StringComparison.Ordinal),
                 runtime.Contains(
-                    "ColorPageHostCoordinator.TryCreateResponse",
+                    "ColorPageHostCoordinator.TryScheduleRequest",
                     StringComparison.Ordinal),
                 runtime.Contains(
                     "ColorPageClientCoordinator.TryAcceptResponse",
@@ -1299,7 +1530,7 @@ public sealed class ColorPageProtocolTests
             FindRepositoryFile("NeonLetterMultiplayerHandshakeRuntime.cs"));
 
         Assert.Equal(
-            (true, true, true, true),
+            (true, true, true, true, false),
             (
                 runtime.Contains(
                     "DeferredClientDisconnects.Schedule(" +
@@ -1313,6 +1544,9 @@ public sealed class ColorPageProtocolTests
                     StringComparison.Ordinal),
                 handshake.Contains(
                     "ColorPageClientCoordinator.Clear()",
+                    StringComparison.Ordinal),
+                runtime.Contains(
+                    "ColorPageResponseScheduler",
                     StringComparison.Ordinal)));
     }
 
@@ -1335,16 +1569,19 @@ public sealed class ColorPageProtocolTests
             "private static void ScheduleFailedColorPageConnection");
 
         Assert.Equal(
-            (true, false, true, true),
+            (true, false, false, true, true),
             (
                 requestHandler.Contains(
-                    "ColorPageResponseScheduler.TrySchedule",
+                    "ColorPageHostCoordinator.TryScheduleRequest",
+                    StringComparison.Ordinal),
+                requestHandler.Contains(
+                    "ColorPageHostCoordinator.TryCreateResponse",
                     StringComparison.Ordinal),
                 requestHandler.Contains(
                     "ColorPageResponse.SendResponse",
                     StringComparison.Ordinal),
                 responseDrain.Contains(
-                    "ColorPageResponseScheduler.Drain",
+                    "ColorPageHostCoordinator.DrainScheduledRequests",
                     StringComparison.Ordinal),
                 sendAdapter.Contains(
                     "ColorPageResponse.SendResponse",
@@ -1628,25 +1865,14 @@ public sealed class ColorPageProtocolTests
             entries);
     }
 
-    private static NeonLetterTargetedColorPage<int, ulong> CreateDelivery(
-        int peer)
+    private static NeonLetterColorPageRequest CreateInitialRequest(
+        ulong syncId)
     {
-        return new NeonLetterTargetedColorPage<int, ulong>(
-            peer,
-            new NeonLetterColorPageResponse<ulong>(
-                NeonLetterColorPageProtocol.ProtocolVersion,
-                SyncId: (ulong)peer,
-                Sequence: 1,
-                WatermarkChangeSerial: 1,
-                NextCursorChangeSerial: 1,
-                Complete: true,
-                new[]
-                {
-                    new NeonLetterColorPageEntry<ulong>(
-                        Identity: (ulong)peer,
-                        EntityRevision: 1,
-                        Green)
-                }));
+        return new NeonLetterColorPageRequest(
+            NeonLetterColorPageProtocol.ProtocolVersion,
+            syncId,
+            CursorChangeSerial: 0,
+            WatermarkChangeSerial: 0);
     }
 
     private static NeonLetterColorPageResponse<ulong> ReadWireResponse(

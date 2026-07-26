@@ -135,40 +135,98 @@ internal readonly record struct NeonLetterTargetedColorPage<TPeer, TKey>(
     where TPeer : notnull
     where TKey : notnull;
 
-internal sealed class NeonLetterColorPageResponseScheduler<TPeer, TKey>
+internal enum NeonLetterColorPageScheduleResult
+{
+    Scheduled,
+    Coalesced,
+    Rejected,
+    CapacityExceeded
+}
+
+internal readonly record struct NeonLetterTargetedColorPageRequest<TPeer>(
+    TPeer Peer,
+    NeonLetterColorPageRequest Request)
+    where TPeer : notnull;
+
+internal sealed class NeonLetterColorPageHostCoordinator<TPeer, TKey>
     where TPeer : notnull
     where TKey : notnull
 {
+    private readonly NeonLetterAuthoritativeColors<TKey> _authoritative;
+    private readonly Func<
+        ulong,
+        ulong,
+        NeonLetterAuthoritativeColorPage<TKey>> _createPage;
+    private readonly Dictionary<TPeer, PeerSync> _peers = new();
     private readonly Dictionary<
         TPeer,
-        LinkedListNode<NeonLetterTargetedColorPage<TPeer, TKey>>> _byPeer =
-            new();
+        LinkedListNode<NeonLetterTargetedColorPageRequest<TPeer>>>
+        _pendingByPeer = new();
     private readonly LinkedList<
-        NeonLetterTargetedColorPage<TPeer, TKey>> _pending = new();
+        NeonLetterTargetedColorPageRequest<TPeer>> _pendingRequests = new();
 
-    internal int PendingCount => _byPeer.Count;
-
-    internal bool TrySchedule(
-        NeonLetterTargetedColorPage<TPeer, TKey> delivery)
+    internal NeonLetterColorPageHostCoordinator(
+        NeonLetterAuthoritativeColors<TKey> authoritative)
+        : this(
+            authoritative,
+            (cursor, watermark) =>
+                authoritative.CreatePage(cursor, watermark))
     {
-        if (_byPeer.ContainsKey(delivery.Peer))
-        {
-            return true;
-        }
-
-        if (_byPeer.Count >=
-            NeonLetterColorPageDeliveryProtocol.MaxPendingPeers)
-        {
-            return false;
-        }
-
-        LinkedListNode<NeonLetterTargetedColorPage<TPeer, TKey>> node =
-            _pending.AddLast(delivery);
-        _byPeer.Add(delivery.Peer, node);
-        return true;
     }
 
-    internal int Drain(
+    internal NeonLetterColorPageHostCoordinator(
+        NeonLetterAuthoritativeColors<TKey> authoritative,
+        Func<
+            ulong,
+            ulong,
+            NeonLetterAuthoritativeColorPage<TKey>> createPage)
+    {
+        ArgumentNullException.ThrowIfNull(authoritative);
+        ArgumentNullException.ThrowIfNull(createPage);
+        _authoritative = authoritative;
+        _createPage = createPage;
+    }
+
+    internal int PeerCount => _peers.Count;
+    internal int OutstandingPageCount => _peers.Count;
+    internal int PendingRequestCount => _pendingByPeer.Count;
+
+    internal NeonLetterColorPageScheduleResult TryScheduleRequest(
+        TPeer peer,
+        bool canSchedule,
+        NeonLetterColorPageRequest request)
+    {
+        if (!canSchedule || !IsValidRequest(request))
+        {
+            return NeonLetterColorPageScheduleResult.Rejected;
+        }
+
+        if (_pendingByPeer.TryGetValue(
+                peer,
+                out LinkedListNode<
+                    NeonLetterTargetedColorPageRequest<TPeer>>? pending))
+        {
+            return pending.Value.Request == request
+                ? NeonLetterColorPageScheduleResult.Coalesced
+                : NeonLetterColorPageScheduleResult.Rejected;
+        }
+
+        if (_pendingByPeer.Count >=
+            NeonLetterColorPageDeliveryProtocol.MaxPendingPeers)
+        {
+            return NeonLetterColorPageScheduleResult.CapacityExceeded;
+        }
+
+        var targeted = new NeonLetterTargetedColorPageRequest<TPeer>(
+            peer,
+            request);
+        LinkedListNode<NeonLetterTargetedColorPageRequest<TPeer>> node =
+            _pendingRequests.AddLast(targeted);
+        _pendingByPeer.Add(peer, node);
+        return NeonLetterColorPageScheduleResult.Scheduled;
+    }
+
+    internal int DrainScheduledRequests(
         Func<TPeer, bool> canSend,
         Action<NeonLetterTargetedColorPage<TPeer, TKey>> send,
         Action<TPeer, Exception> onFailure)
@@ -178,80 +236,53 @@ internal sealed class NeonLetterColorPageResponseScheduler<TPeer, TKey>
         ArgumentNullException.ThrowIfNull(onFailure);
 
         var updateBatch =
-            new NeonLetterTargetedColorPage<TPeer, TKey>[
+            new NeonLetterTargetedColorPageRequest<TPeer>[
                 NeonLetterColorPageDeliveryProtocol.MaxPagesPerUpdate];
         int batchCount = 0;
         while (batchCount < updateBatch.Length &&
-               _pending.First != null)
+               _pendingRequests.First != null)
         {
             LinkedListNode<
-                NeonLetterTargetedColorPage<TPeer, TKey>> node =
-                    _pending.First;
-            _pending.RemoveFirst();
-            _byPeer.Remove(node.Value.Peer);
+                NeonLetterTargetedColorPageRequest<TPeer>> node =
+                    _pendingRequests.First;
+            _pendingRequests.RemoveFirst();
+            _pendingByPeer.Remove(node.Value.Peer);
             updateBatch[batchCount++] = node.Value;
         }
 
         int sentCount = 0;
         for (int index = 0; index < batchCount; index++)
         {
-            NeonLetterTargetedColorPage<TPeer, TKey> delivery =
+            NeonLetterTargetedColorPageRequest<TPeer> scheduled =
                 updateBatch[index];
-            if (!canSend(delivery.Peer))
+            if (!canSend(scheduled.Peer))
             {
                 continue;
             }
 
             try
             {
+                if (!TryCreateResponse(
+                        scheduled.Peer,
+                        canSend: true,
+                        scheduled.Request,
+                        out NeonLetterTargetedColorPage<TPeer, TKey>
+                            delivery))
+                {
+                    continue;
+                }
+
                 send(delivery);
                 sentCount++;
             }
             catch (Exception exception)
             {
-                onFailure(delivery.Peer, exception);
+                onFailure(scheduled.Peer, exception);
             }
         }
 
         return sentCount;
     }
-
-    internal void Remove(TPeer peer)
-    {
-        if (!_byPeer.Remove(
-                peer,
-                out LinkedListNode<
-                    NeonLetterTargetedColorPage<TPeer, TKey>>? node))
-        {
-            return;
-        }
-
-        _pending.Remove(node);
-    }
-
-    internal void Clear()
-    {
-        _byPeer.Clear();
-        _pending.Clear();
-    }
-}
-
-internal sealed class NeonLetterColorPageHostCoordinator<TPeer, TKey>
-    where TPeer : notnull
-    where TKey : notnull
-{
-    private readonly NeonLetterAuthoritativeColors<TKey> _authoritative;
-    private readonly Dictionary<TPeer, PeerSync> _peers = new();
-
-    internal NeonLetterColorPageHostCoordinator(
-        NeonLetterAuthoritativeColors<TKey> authoritative)
-    {
-        ArgumentNullException.ThrowIfNull(authoritative);
-        _authoritative = authoritative;
-    }
-
-    internal int PeerCount => _peers.Count;
-    internal int OutstandingPageCount => _peers.Count;
 
     internal bool TryCreateResponse(
         TPeer peer,
@@ -303,7 +334,7 @@ internal sealed class NeonLetterColorPageHostCoordinator<TPeer, TKey>
         }
 
         NeonLetterAuthoritativeColorPage<TKey> page =
-            _authoritative.CreatePage(
+            _createPage(
                 request.CursorChangeSerial,
                 request.WatermarkChangeSerial);
         var response = new NeonLetterColorPageResponse<TKey>(
@@ -323,12 +354,37 @@ internal sealed class NeonLetterColorPageHostCoordinator<TPeer, TKey>
 
     internal void Remove(TPeer peer)
     {
+        RemovePendingRequest(peer);
         _peers.Remove(peer);
+    }
+
+    internal void Quarantine(
+        TPeer peer,
+        Action<TPeer> scheduleDisconnect)
+    {
+        ArgumentNullException.ThrowIfNull(scheduleDisconnect);
+        Remove(peer);
+        scheduleDisconnect(peer);
     }
 
     internal void Clear()
     {
+        _pendingByPeer.Clear();
+        _pendingRequests.Clear();
         _peers.Clear();
+    }
+
+    private void RemovePendingRequest(TPeer peer)
+    {
+        if (!_pendingByPeer.Remove(
+                peer,
+                out LinkedListNode<
+                    NeonLetterTargetedColorPageRequest<TPeer>>? node))
+        {
+            return;
+        }
+
+        _pendingRequests.Remove(node);
     }
 
     private bool IsValidRequest(NeonLetterColorPageRequest request)
