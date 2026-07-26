@@ -168,14 +168,19 @@ internal sealed class NeonLetterMultiplayerRestoreEntrySnapshot
 internal sealed class NeonLetterMultiplayerRestoreSnapshot
 {
     private static readonly NeonLetterMultiplayerRestoreSnapshot EmptySnapshot =
-        new(new List<NeonLetterMultiplayerRestoreEntrySnapshot>());
+        new(
+            new List<NeonLetterMultiplayerRestoreEntrySnapshot>(),
+            onEntryTransferred: null);
     private readonly IReadOnlyList<NeonLetterMultiplayerRestoreEntrySnapshot>
         _entries;
+    private readonly Action<int>? _onEntryTransferred;
 
     private NeonLetterMultiplayerRestoreSnapshot(
-        List<NeonLetterMultiplayerRestoreEntrySnapshot> entries)
+        List<NeonLetterMultiplayerRestoreEntrySnapshot> entries,
+        Action<int>? onEntryTransferred)
     {
         _entries = entries.AsReadOnly();
+        _onEntryTransferred = onEntryTransferred;
     }
 
     internal static NeonLetterMultiplayerRestoreSnapshot Empty =>
@@ -186,7 +191,8 @@ internal sealed class NeonLetterMultiplayerRestoreSnapshot
 
     internal static NeonLetterMultiplayerRestoreSnapshot Sanitize(
         NeonLetterMultiplayerSaveEnvelope? envelope,
-        Action? onEntryVisited = null)
+        Action? onEntryVisited = null,
+        Action<int>? onEntryTransferred = null)
     {
         if (envelope == null ||
             envelope.Version != NeonLetterMultiplayerSaveEnvelope.CurrentVersion ||
@@ -212,7 +218,14 @@ internal sealed class NeonLetterMultiplayerRestoreSnapshot
 
         return entries.Count == 0
             ? Empty
-            : new NeonLetterMultiplayerRestoreSnapshot(entries);
+            : new NeonLetterMultiplayerRestoreSnapshot(
+                entries,
+                onEntryTransferred);
+    }
+
+    internal void NotifyEntryTransferred(int transferredCount)
+    {
+        _onEntryTransferred?.Invoke(transferredCount);
     }
 
     internal NeonLetterMultiplayerSaveEnvelope ToEnvelope()
@@ -1006,10 +1019,12 @@ public sealed class NeonLetterMultiplayerRestoreCoordinator<TTarget>
         NeonLetterMultiplayerRestoreSnapshot accepted = _stagedSnapshot;
         _stagedSnapshot = NeonLetterMultiplayerRestoreSnapshot.Empty;
         _hasStagedEnvelope = false;
+        int transferredCount = 0;
         foreach (NeonLetterMultiplayerRestoreEntrySnapshot entry in
                  accepted.Entries)
         {
             _pending.AddLast(new PendingRestore(entry));
+            accepted.NotifyEntryTransferred(++transferredCount);
         }
         _nextPending = _pending.First;
     }

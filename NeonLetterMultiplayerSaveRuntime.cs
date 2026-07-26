@@ -19,10 +19,6 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             .MaxFallbackSpawnsPerUpdate;
     private static readonly NeonLetterMultiplayerSaveRuntime Instance = new();
     private static readonly NeonLetterLifecycleCoordinator Lifecycle = new();
-    private static readonly Func<
-        NeonLetterMultiplayerSaveEntry,
-        RestoreTarget,
-        bool> ApplyRestoredColorCallback = ApplyRestoredColor;
     private static readonly Action<
         NeonLetterMultiplayerSaveEntry,
         Exception> LogRestoreErrorCallback = LogRestoreError;
@@ -35,7 +31,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
     private readonly NeonLetterMonotonicSequence _restoreSignals = new();
     private readonly NeonLetterMultiplayerRestoreLoadQueue
         _queuedLoads = new();
-    private readonly object _restoreStateSync = new();
+    private readonly NeonLetterRestoreWorkOwnership _restoreWork = new();
     private readonly Dictionary<int, RestoreTarget> _nativeTargets = new();
     private readonly Dictionary<int, StructureRecipe> _processedRecipes = new();
     private readonly Func<
@@ -45,14 +41,21 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         NeonLetterMultiplayerRestoreObservation<RestoreTarget>> _observeRestore;
     private readonly Func<NeonLetterMultiplayerSaveEntry, RestoreTarget>
         _startFallback;
-    private bool _afterLoadSaveReceived;
-    private bool _afterSpawnReceived;
+    private readonly Func<
+        NeonLetterMultiplayerSaveEntry,
+        RestoreTarget,
+        bool> _applyRestored;
+    private volatile bool _afterLoadSaveReceived;
+    private volatile bool _afterSpawnReceived;
+    private NeonLetterRestoreUpdateOwnership? _activeUpdateOwnership;
+    private bool _coordinatorResetPerformed;
     private long _restoreUpdateTick;
 
     private NeonLetterMultiplayerSaveRuntime()
     {
-        _observeRestore = ObserveRestore;
-        _startFallback = StartFallback;
+        _observeRestore = ObserveRestoreWithCancellation;
+        _startFallback = StartFallbackWithCancellation;
+        _applyRestored = ApplyRestoredColorWithCancellation;
     }
 
     public string Name => "SOTFNeonLetters.MultiplayerWorld";
@@ -258,10 +261,37 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
     private void OnInWorldUpdate()
     {
-        lock (_restoreStateSync)
+        if (!_restoreWork.TryBeginUpdate(
+                out NeonLetterRestoreUpdateOwnership ownership))
+        {
+            return;
+        }
+
+        _activeUpdateOwnership = ownership;
+        try
         {
             DrainQueuedLoad();
+            if (TryCancelRequestedRestoreWork())
+            {
+                return;
+            }
+
             AdvanceRestore();
+            TryCancelRequestedRestoreWork();
+        }
+        finally
+        {
+            bool coordinatorResetPerformed = _coordinatorResetPerformed;
+            _coordinatorResetPerformed = false;
+            _activeUpdateOwnership = null;
+            if (_restoreWork.CompleteUpdate(
+                    ownership,
+                    out NeonLetterRestoreResetOwnership resetOwnership))
+            {
+                PerformReset(
+                    resetOwnership,
+                    coordinatorResetPerformed);
+            }
         }
     }
 
@@ -283,41 +313,89 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         bool rollbackOwnedFallbacks,
         bool resumeLoads)
     {
-        lock (_restoreStateSync)
+        _queuedLoads.SuspendAndClear();
+        if (_restoreWork.RequestReset(
+                rollbackOwnedFallbacks,
+                resumeLoads,
+                out NeonLetterRestoreResetOwnership ownership))
         {
-            _queuedLoads.SuspendAndClear();
-            try
+            PerformReset(ownership);
+        }
+    }
+
+    private void PerformReset(
+        NeonLetterRestoreResetOwnership ownership,
+        bool coordinatorResetPerformed = false)
+    {
+        NeonLetterRestoreResetRequest request =
+            _restoreWork.GetResetRequest(ownership);
+        try
+        {
+            if (!coordinatorResetPerformed &&
+                request.RollbackOwnedFallbacks)
             {
-                if (rollbackOwnedFallbacks)
-                {
-                    _restoreCoordinator.Clear();
-                }
-                else
-                {
-                    _restoreCoordinator.AbandonWithoutWorldMutation();
-                }
+                _restoreCoordinator.Clear();
             }
-            finally
+            else if (!coordinatorResetPerformed)
             {
-                _nativeTargets.Clear();
-                _processedRecipes.Clear();
-                _afterLoadSaveReceived = false;
-                _afterSpawnReceived = false;
-                _restoreReadiness.Reset();
-                _restoreUpdateTick = 0;
-                _queuedLoads.SuspendAndClear();
-                if (resumeLoads && _initialized)
-                {
-                    _queuedLoads.Resume();
-                }
+                _restoreCoordinator.AbandonWithoutWorldMutation();
             }
         }
+        finally
+        {
+            _nativeTargets.Clear();
+            _processedRecipes.Clear();
+            _afterLoadSaveReceived = false;
+            _afterSpawnReceived = false;
+            _restoreReadiness.Reset();
+            _restoreUpdateTick = 0;
+            _queuedLoads.SuspendAndClear();
+            NeonLetterRestoreResetCompletion completion =
+                _restoreWork.CompleteReset(ownership);
+            if (completion.ResumeLoads && _initialized)
+            {
+                _queuedLoads.Resume();
+            }
+        }
+    }
+
+    private bool TryCancelRequestedRestoreWork()
+    {
+        if (_coordinatorResetPerformed)
+        {
+            return true;
+        }
+
+        if (!_activeUpdateOwnership.HasValue ||
+            !_restoreWork.TryGetPendingResetRequest(
+                _activeUpdateOwnership.Value,
+                out NeonLetterRestoreResetRequest request))
+        {
+            return false;
+        }
+
+        _coordinatorResetPerformed = true;
+        if (request.RollbackOwnedFallbacks)
+        {
+            _restoreCoordinator.Clear();
+        }
+        else
+        {
+            _restoreCoordinator.AbandonWithoutWorldMutation();
+        }
+
+        return true;
     }
 
     private void DrainQueuedLoad()
     {
         if (!_queuedLoads.TryDequeue(
                 out NeonLetterMultiplayerRestoreSnapshot snapshot))
+        {
+            return;
+        }
+
+        if (TryCancelRequestedRestoreWork())
         {
             return;
         }
@@ -432,7 +510,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             maxFallbackSpawns: MaxFallbackSpawnsPerTick,
             observe: _observeRestore,
             startFallback: _startFallback,
-            applyRestored: ApplyRestoredColorCallback,
+            applyRestored: _applyRestored,
             onEntryError: LogRestoreErrorCallback);
     }
 
@@ -441,8 +519,10 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
         bool managerLoading,
         int structureCount)
     {
+        ulong signalGeneration =
+            _restoreWork.ReadSignal(_restoreSignals);
         return new MultiplayerRestoreProgress(
-            _restoreSignals.Current,
+            signalGeneration,
             _restoreCoordinator.Role,
             managerAvailable,
             managerLoading,
@@ -464,10 +544,7 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
 
     private void SignalRestoreProgress()
     {
-        lock (_restoreStateSync)
-        {
-            _restoreSignals.Advance();
-        }
+        _restoreWork.RecordSignal(_restoreSignals);
     }
 
     private readonly record struct MultiplayerRestoreProgress(
@@ -498,6 +575,25 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             _restoreCoordinator.SetRole(
                 NeonLetterMultiplayerRestoreRole.Client);
         }
+    }
+
+    private NeonLetterMultiplayerRestoreObservation<RestoreTarget>
+        ObserveRestoreWithCancellation(
+            NeonLetterMultiplayerSaveEntry entry,
+            bool fallbackSpawnStarted,
+            RestoreTarget spawnedTarget)
+    {
+        if (TryCancelRequestedRestoreWork())
+        {
+            return new NeonLetterMultiplayerRestoreObservation<RestoreTarget>(
+                NeonLetterMultiplayerRestoreObservationKind
+                    .ProcessedRecipeUnavailable);
+        }
+
+        return ObserveRestore(
+            entry,
+            fallbackSpawnStarted,
+            spawnedTarget);
     }
 
     private NeonLetterMultiplayerRestoreObservation<RestoreTarget>
@@ -614,6 +710,18 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             recipeId);
     }
 
+    private RestoreTarget StartFallbackWithCancellation(
+        NeonLetterMultiplayerSaveEntry entry)
+    {
+        if (TryCancelRequestedRestoreWork())
+        {
+            throw new OperationCanceledException(
+                "Multiplayer restore was cancelled before fallback spawn.");
+        }
+
+        return StartFallback(entry);
+    }
+
     private RestoreTarget StartFallback(
         NeonLetterMultiplayerSaveEntry entry)
     {
@@ -646,6 +754,21 @@ internal sealed class NeonLetterMultiplayerSaveRuntime
             spawnedEntity,
             RollbackFallback,
             DestroyLocalFallback);
+    }
+
+    private bool ApplyRestoredColorWithCancellation(
+        NeonLetterMultiplayerSaveEntry entry,
+        RestoreTarget target)
+    {
+        if (TryCancelRequestedRestoreWork())
+        {
+            return false;
+        }
+
+        bool applied = ApplyRestoredColor(entry, target);
+        return TryCancelRequestedRestoreWork()
+            ? false
+            : applied;
     }
 
     private static bool ApplyRestoredColor(

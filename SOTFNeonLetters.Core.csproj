@@ -24,6 +24,7 @@
         <Compile Include="NeonLetterColorPageSync.cs" />
         <Compile Include="NeonLetterColorPersistencePolicy.cs" />
         <Compile Include="NeonLetterMonotonicSequence.cs" />
+        <Compile Include="NeonLetterRestoreWorkOwnership.cs" />
         <Compile Include="NeonLetterRestoreReadinessScheduler.cs" />
         <Compile Include="NeonLetterSinglePlayerRestoreCoordinator.cs" />
         <Compile Include="NeonLetterRuntimePolicy.cs" />

@@ -3,6 +3,8 @@ using Xunit;
 
 public sealed class MultiplayerRestoreLoadQueueTests
 {
+    private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(10);
+
     [Fact]
     public void QueuedReplacementDefersOwnedFallbackRollbackUntilUpdate()
     {
@@ -340,8 +342,10 @@ public sealed class MultiplayerRestoreLoadQueueTests
             {
                 if (envelope!.Entries.Single().NativeSaveId == 1)
                 {
-                    firstSanitizationBarrier.SignalAndWait();
-                    releaseFirstSanitization.Wait();
+                    Assert.True(
+                        firstSanitizationBarrier.SignalAndWait(TestTimeout));
+                    Assert.True(
+                        releaseFirstSanitization.Wait(TestTimeout));
                 }
 
                 return NeonLetterMultiplayerRestoreSnapshot.Sanitize(envelope);
@@ -352,17 +356,28 @@ public sealed class MultiplayerRestoreLoadQueueTests
             () => firstAccepted = queue.Enqueue(
                 CreateEnvelope(nativeSaveId: 1),
                 out firstSequence));
-        firstSanitizationBarrier.SignalAndWait();
+        Assert.True(
+            firstSanitizationBarrier.SignalAndWait(TestTimeout));
 
-        bool secondAccepted = queue.Enqueue(
-            CreateEnvelope(nativeSaveId: 2),
-            out ulong secondSequence);
-        Assert.True(queue.TryDequeue(
-            out NeonLetterMultiplayerRestoreSnapshot latest));
-        int latestNativeSaveId =
-            latest.Entries.Single().RestoreEntry.NativeSaveId;
-        releaseFirstSanitization.Set();
-        await firstLoad;
+        bool secondAccepted;
+        ulong secondSequence;
+        int latestNativeSaveId;
+        try
+        {
+            secondAccepted = queue.Enqueue(
+                CreateEnvelope(nativeSaveId: 2),
+                out secondSequence);
+            Assert.True(queue.TryDequeue(
+                out NeonLetterMultiplayerRestoreSnapshot latest));
+            latestNativeSaveId =
+                latest.Entries.Single().RestoreEntry.NativeSaveId;
+        }
+        finally
+        {
+            releaseFirstSanitization.Set();
+        }
+
+        await firstLoad.WaitAsync(TestTimeout);
 
         Assert.Equal(
             (true, true, true, 2, false),
@@ -382,20 +397,28 @@ public sealed class MultiplayerRestoreLoadQueueTests
         var queue = new NeonLetterMultiplayerRestoreLoadQueue(
             envelope =>
             {
-                sanitizationBarrier.SignalAndWait();
-                releaseSanitization.Wait();
+                Assert.True(
+                    sanitizationBarrier.SignalAndWait(TestTimeout));
+                Assert.True(releaseSanitization.Wait(TestTimeout));
                 return NeonLetterMultiplayerRestoreSnapshot.Sanitize(envelope);
             });
         bool accepted = true;
         Task racingLoad = Task.Run(
             () => accepted = queue.Enqueue(
                 CreateEnvelope(nativeSaveId: 1)));
-        sanitizationBarrier.SignalAndWait();
+        Assert.True(sanitizationBarrier.SignalAndWait(TestTimeout));
 
-        queue.SuspendAndClear();
-        queue.Resume();
-        releaseSanitization.Set();
-        await racingLoad;
+        try
+        {
+            queue.SuspendAndClear();
+            queue.Resume();
+        }
+        finally
+        {
+            releaseSanitization.Set();
+        }
+
+        await racingLoad.WaitAsync(TestTimeout);
 
         Assert.Equal(
             (false, false),
