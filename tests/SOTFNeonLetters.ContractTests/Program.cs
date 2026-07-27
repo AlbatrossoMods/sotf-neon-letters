@@ -229,12 +229,18 @@ void CheckWallPlacementContract()
     NeonLetterASmallDefinition.PlacementDefinition placement =
         NeonLetterASmallDefinition.Placement;
 
-    CheckEqual(false, placement.AlignToSurface, "Small A avoids the crashing native surface-alignment path");
-    CheckEqual(0f, placement.InitialRotationX, "Small A has no X rotation offset");
-    CheckEqual(180f, placement.InitialRotationY, "Small A faces the player instead of showing its mirrored back");
-    CheckEqual(0f, placement.InitialRotationZ, "Small A has no Z rotation offset");
-    CheckEqual(true, placement.AllowsTreePlacement, "Small A accepts vanilla wall targets");
-    CheckEqual(true, placement.AllowsNonTreePlacement, "Small A accepts built wall targets");
+    CheckEqual(
+        true,
+        placement.AlignToSurface,
+        "wall-mounted symbols use the acquired wall normal for alignment");
+    CheckEqual(0f, placement.InitialRotationX, "wall-mounted symbols have no X rotation offset");
+    CheckEqual(0f, placement.InitialRotationY, "wall-mounted symbols have no Y rotation offset");
+    CheckEqual(0f, placement.InitialRotationZ, "wall-mounted symbols have no Z rotation offset");
+    CheckEqual(true, placement.AllowsTreePlacement, "wall-mounted symbols accept structural wall targets");
+    CheckEqual(
+        false,
+        placement.AllowsNonTreePlacement,
+        "wall-mounted symbols do not retain the ground recipe's non-tree placement mode");
 }
 
 void CheckColliderContract()
@@ -512,9 +518,9 @@ void CheckAlphabetCatalog()
     char[] expectedLetters = Enumerable.Range('A', 26).Select(value => (char)value).ToArray();
 
     CheckEqual(
-        180f,
+        0f,
         NeonLetterSmallCatalog.Placement.InitialRotationY,
-        "the shared A-Z placement faces every letter toward the player");
+        "the shared symbol placement keeps the canonical wall-mounted rotation offset");
     CheckEqual(26, definitions.Count, "small catalog contains the complete English alphabet");
     CheckSequence(expectedLetters, definitions.Select(definition => definition.Letter), "small catalog is ordered A-Z");
     CheckEqual(

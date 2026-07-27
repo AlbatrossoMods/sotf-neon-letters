@@ -25,15 +25,15 @@ public static class NeonLetterASmallDefinition
     public static PlacementDefinition Placement { get; } = new(
         PlacementAnchor.Back,
         PlacementCastRadiusFormula.Z,
-        AlignToSurface: false,
+        AlignToSurface: true,
         CanBeRotated: false,
         ForceUp: true,
         LockUpwardVector: true,
         InitialRotationX: 0f,
-        InitialRotationY: 180f,
+        InitialRotationY: 0f,
         InitialRotationZ: 0f,
         AllowsTreePlacement: true,
-        AllowsNonTreePlacement: true,
+        AllowsNonTreePlacement: false,
         MinimumHeightAboveTree: 0.5f,
         MaximumHeightAboveTree: 4f,
         AllowDynamicObjectParenting: true,
@@ -42,7 +42,7 @@ public static class NeonLetterASmallDefinition
         UseFreeFormStructures: false,
         AutoFoundation: false,
         UseOverridePlacementSize: false,
-        PlacementDepthSizeRatio: 0.5f);
+        PlacementDepthSizeRatio: 1f);
 
     public static IReadOnlyList<IngredientDefinition> Ingredients { get; } = Array.AsReadOnly(
         new[]

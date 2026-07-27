@@ -29,9 +29,9 @@ public readonly record struct WallMountedVisualDepthLayout(
 
 public static class WallMountedVisualDepthPolicy
 {
-    // StructureRecipe.AnchorType.Back places local Z=0 on the wall. The neon
-    // recipe's 180-degree placement rotation makes positive local Z point
-    // away from the wall, so every completed visual needs a positive minimum Z.
+    // StructureRecipe.AnchorType.Back aligns the prefab's positive local Z
+    // with the acquired outward wall normal, so wall-mounted geometry needs
+    // a positive minimum Z to remain visibly clear of the supporting surface.
     public const float SurfaceClearance = 0.01f;
 
     public static WallMountedVisualDepthLayout Resolve(

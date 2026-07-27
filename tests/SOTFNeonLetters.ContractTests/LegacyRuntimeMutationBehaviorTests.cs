@@ -4,34 +4,54 @@ using Xunit;
 public sealed class LegacyRuntimeMutationBehaviorTests
 {
     [Fact]
-    public void SmallLetterPlacementKeepsTheCanonicalWallMountFlags()
+    public void WallMountedSymbolPlacementMatchesTheCanonicalWallShelfContract()
     {
         NeonLetterASmallDefinition.PlacementDefinition placement =
             NeonLetterASmallDefinition.Placement;
 
         Assert.Equal(
             (
-                AlignToSurface: false,
+                Anchor: NeonLetterASmallDefinition.PlacementAnchor.Back,
+                CastRadiusFormula: NeonLetterASmallDefinition.PlacementCastRadiusFormula.Z,
+                AlignToSurface: true,
                 CanBeRotated: false,
                 ForceUp: true,
                 LockUpwardVector: true,
+                InitialRotationX: 0f,
+                InitialRotationY: 0f,
+                InitialRotationZ: 0f,
+                AllowsTreePlacement: true,
+                AllowsNonTreePlacement: false,
+                MinimumHeightAboveTree: 0.5f,
+                MaximumHeightAboveTree: 4f,
                 AllowDynamicObjectParenting: true,
                 AllowScrewStructureParenting: true,
                 AllowFreeFormStructureParenting: true,
                 UseFreeFormStructures: false,
                 AutoFoundation: false,
-                UseOverridePlacementSize: false),
+                UseOverridePlacementSize: false,
+                PlacementDepthSizeRatio: 1f),
             (
+                placement.Anchor,
+                placement.CastRadiusFormula,
                 placement.AlignToSurface,
                 placement.CanBeRotated,
                 placement.ForceUp,
                 placement.LockUpwardVector,
+                placement.InitialRotationX,
+                placement.InitialRotationY,
+                placement.InitialRotationZ,
+                placement.AllowsTreePlacement,
+                placement.AllowsNonTreePlacement,
+                placement.MinimumHeightAboveTree,
+                placement.MaximumHeightAboveTree,
                 placement.AllowDynamicObjectParenting,
                 placement.AllowScrewStructureParenting,
                 placement.AllowFreeFormStructureParenting,
                 placement.UseFreeFormStructures,
                 placement.AutoFoundation,
-                placement.UseOverridePlacementSize));
+                placement.UseOverridePlacementSize,
+                placement.PlacementDepthSizeRatio));
     }
 
     [Fact]
