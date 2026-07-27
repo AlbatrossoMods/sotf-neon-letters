@@ -234,7 +234,10 @@ void CheckWallPlacementContract()
         placement.AlignToSurface,
         "wall-mounted symbols use the acquired wall normal for alignment");
     CheckEqual(0f, placement.InitialRotationX, "wall-mounted symbols have no X rotation offset");
-    CheckEqual(0f, placement.InitialRotationY, "wall-mounted symbols have no Y rotation offset");
+    CheckEqual(
+        180f,
+        placement.InitialRotationY,
+        "wall placement configures the model-facing half-turn");
     CheckEqual(0f, placement.InitialRotationZ, "wall-mounted symbols have no Z rotation offset");
     CheckEqual(true, placement.AllowsTreePlacement, "wall-mounted symbols accept structural wall targets");
     CheckEqual(
@@ -518,9 +521,9 @@ void CheckAlphabetCatalog()
     char[] expectedLetters = Enumerable.Range('A', 26).Select(value => (char)value).ToArray();
 
     CheckEqual(
-        0f,
+        180f,
         NeonLetterSmallCatalog.Placement.InitialRotationY,
-        "the shared symbol placement keeps the canonical wall-mounted rotation offset");
+        "the shared symbol placement retains the configured model-facing half-turn");
     CheckEqual(26, definitions.Count, "small catalog contains the complete English alphabet");
     CheckSequence(expectedLetters, definitions.Select(definition => definition.Letter), "small catalog is ordered A-Z");
     CheckEqual(

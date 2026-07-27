@@ -115,6 +115,18 @@ public interface IRuntimeMaterialFactory
     IRuntimeMaterialHandle Create();
 }
 
+internal static class NeonLetterRuntimeShaderSelection
+{
+    internal const string ShaderName = "Sons/HDRPLit";
+
+    public static TShader Resolve<TShader>(
+        Func<string, TShader> shaderResolver)
+    {
+        ArgumentNullException.ThrowIfNull(shaderResolver);
+        return shaderResolver(ShaderName);
+    }
+}
+
 public interface IRuntimeMaterialOwner
 {
     void Release(IRuntimeMaterialHandle material);

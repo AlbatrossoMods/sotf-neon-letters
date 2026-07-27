@@ -5,6 +5,23 @@ using Xunit;
 public sealed class BlueprintMaterialTransactionTests
 {
     [Fact]
+    public void RuntimeShaderSelectionPassesTheSonsLitNameToItsResolver()
+    {
+        string? requestedShaderName = null;
+        object resolvedShader = new();
+
+        object selectedShader = NeonLetterRuntimeShaderSelection.Resolve(
+            shaderName =>
+            {
+                requestedShaderName = shaderName;
+                return resolvedShader;
+            });
+
+        Assert.Same(resolvedShader, selectedShader);
+        Assert.Equal("Sons/HDRPLit", requestedShaderName);
+    }
+
+    [Fact]
     public void MaterialFactoryFailureLeavesEveryRendererUnchangedAndReleasesPreparedClones()
     {
         var firstSource = new TransactionMaterial("first", cloneDepth: 0);

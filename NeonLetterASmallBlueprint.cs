@@ -72,7 +72,8 @@ public static class NeonLetterSmallBlueprint
         var materialTransaction = new RuntimeMaterialCatalogTransaction(
             () =>
             {
-                gameShader = GameResources.GetShader(ShaderAssetMap.HDRPLit);
+                gameShader = NeonLetterRuntimeShaderSelection.Resolve(
+                    GameResources.GetShader);
                 return new UnityRuntimeMaterialFactory(gameShader);
             },
             materialEntries);
@@ -1172,7 +1173,10 @@ public static class NeonLetterSmallBlueprint
             _shader = shader;
         }
 
-        public string ShaderName => _shader == null ? ShaderAssetMap.HDRPLit : _shader.name;
+        public string ShaderName =>
+            _shader == null
+                ? NeonLetterRuntimeShaderSelection.ShaderName
+                : _shader.name;
         public bool IsShaderSupported => _shader != null && _shader.isSupported;
 
         public IRuntimeMaterialHandle Create()

@@ -4,7 +4,7 @@ using Xunit;
 public sealed class LegacyRuntimeMutationBehaviorTests
 {
     [Fact]
-    public void WallMountedSymbolPlacementMatchesTheCanonicalWallShelfContract()
+    public void WallMountedSymbolPlacementKeepsCanonicalWallTargetingModes()
     {
         NeonLetterASmallDefinition.PlacementDefinition placement =
             NeonLetterASmallDefinition.Placement;
@@ -18,7 +18,6 @@ public sealed class LegacyRuntimeMutationBehaviorTests
                 ForceUp: true,
                 LockUpwardVector: true,
                 InitialRotationX: 0f,
-                InitialRotationY: 0f,
                 InitialRotationZ: 0f,
                 AllowsTreePlacement: true,
                 AllowsNonTreePlacement: false,
@@ -39,7 +38,6 @@ public sealed class LegacyRuntimeMutationBehaviorTests
                 placement.ForceUp,
                 placement.LockUpwardVector,
                 placement.InitialRotationX,
-                placement.InitialRotationY,
                 placement.InitialRotationZ,
                 placement.AllowsTreePlacement,
                 placement.AllowsNonTreePlacement,
@@ -52,6 +50,20 @@ public sealed class LegacyRuntimeMutationBehaviorTests
                 placement.AutoFoundation,
                 placement.UseOverridePlacementSize,
                 placement.PlacementDepthSizeRatio));
+    }
+
+    [Fact]
+    public void PlacementApplicationTransfersTheConfiguredModelFacingHalfTurn()
+    {
+        var target = new PlacementRetentionTarget();
+
+        RecipePlacementApplicator.Apply(
+            NeonLetterASmallDefinition.Placement,
+            target);
+
+        Assert.Equal(
+            180f,
+            target.InitialRotationY);
     }
 
     [Fact]

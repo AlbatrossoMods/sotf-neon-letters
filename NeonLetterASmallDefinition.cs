@@ -30,7 +30,7 @@ public static class NeonLetterASmallDefinition
         ForceUp: true,
         LockUpwardVector: true,
         InitialRotationX: 0f,
-        InitialRotationY: 0f,
+        InitialRotationY: 180f,
         InitialRotationZ: 0f,
         AllowsTreePlacement: true,
         AllowsNonTreePlacement: false,
