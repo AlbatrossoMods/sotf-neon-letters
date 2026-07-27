@@ -392,8 +392,13 @@ public static class NeonLetterSmallBlueprint
             new SonsRecipePlacementTarget(craftingNode, recipe);
         Action restorePlacement =
             CapturePlacementRestoreAction(craftingNode, recipe);
+        PreparedBuiltVisualDepthMutation builtVisualDepth =
+            PrepareBuiltVisualDepth(recipe, definition);
         PreparedColliderMutation builtCollider =
-            PrepareBuiltPrefabCollider(recipe, definition);
+            PrepareBuiltPrefabCollider(
+                recipe,
+                definition,
+                builtVisualDepth.AdjustedVisualBounds);
         PreparedColliderMutation craftingNodeCollider =
             PrepareCraftingNodeCollider(craftingNode, definition);
         Texture2D recipeImage = Assets.GetBookIcon(definition.Symbol);
@@ -420,6 +425,9 @@ public static class NeonLetterSmallBlueprint
                         NeonLetterSmallCatalog.Placement,
                         placementTarget),
                     restorePlacement);
+                transaction.Apply(
+                    builtVisualDepth.Apply,
+                    builtVisualDepth.Restore);
                 transaction.Apply(
                     builtCollider.Apply,
                     builtCollider.Restore);
@@ -492,7 +500,8 @@ public static class NeonLetterSmallBlueprint
 
     private static PreparedColliderMutation PrepareBuiltPrefabCollider(
         StructureRecipe recipe,
-        NeonLetterSmallDefinition definition)
+        NeonLetterSmallDefinition definition,
+        Bounds visualBounds)
     {
         GameObject builtPrefab = recipe._builtPrefab;
         if (builtPrefab == null)
@@ -501,8 +510,6 @@ public static class NeonLetterSmallBlueprint
                 $"Recipe {recipe.Id} has no built prefab to size from its visible geometry.");
         }
 
-        Transform visualRoot = FindColliderVisualRoot(builtPrefab, definition);
-        Bounds visualBounds = CalculateLocalRendererBounds(builtPrefab, visualRoot);
         BoxCollider collider = builtPrefab.GetComponent<BoxCollider>();
         if (collider == null)
         {
@@ -511,6 +518,64 @@ public static class NeonLetterSmallBlueprint
         }
 
         return PrepareBounds(collider, visualBounds, definition);
+    }
+
+    private static PreparedBuiltVisualDepthMutation PrepareBuiltVisualDepth(
+        StructureRecipe recipe,
+        NeonLetterSmallDefinition definition)
+    {
+        GameObject builtPrefab = recipe._builtPrefab;
+        if (builtPrefab == null)
+        {
+            throw new InvalidOperationException(
+                $"Recipe {recipe.Id} has no completed prefab whose wall depth can be normalized.");
+        }
+
+        Transform visualRoot = FindColliderVisualRoot(builtPrefab, definition);
+        Bounds visualBounds = CalculateLocalRendererBounds(builtPrefab, visualRoot);
+        WallMountedVisualDepthLayout layout =
+            WallMountedVisualDepthPolicy.Resolve(
+                visualBounds.min.z,
+                visualBounds.max.z);
+
+        var ingredientTransforms = new List<Transform>(definition.Ingredients.Count);
+        foreach (NeonLetterSmallDefinition.IngredientDefinition ingredient
+                 in definition.Ingredients)
+        {
+            Transform matchingTransform = null;
+            int matchCount = 0;
+            for (int childIndex = 0;
+                 childIndex < builtPrefab.transform.childCount;
+                 childIndex++)
+            {
+                Transform child = builtPrefab.transform.GetChild(childIndex);
+                if (!string.Equals(
+                        child.name,
+                        ingredient.ChildName,
+                        StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                matchingTransform = child;
+                matchCount++;
+            }
+
+            if (matchCount != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Completed prefab '{builtPrefab.name}' must contain exactly one top-level " +
+                    $"ingredient visual named '{ingredient.ChildName}', but found {matchCount}.");
+            }
+
+            ingredientTransforms.Add(matchingTransform);
+        }
+
+        return new PreparedBuiltVisualDepthMutation(
+            builtPrefab,
+            ingredientTransforms,
+            visualBounds,
+            layout);
     }
 
     private static PreparedColliderMutation PrepareCraftingNodeCollider(
@@ -769,6 +834,65 @@ public static class NeonLetterSmallBlueprint
         {
             _collider.size = _originalSize;
             _collider.center = _originalCenter;
+        }
+    }
+
+    private sealed class PreparedBuiltVisualDepthMutation
+    {
+        private const float DepthValidationTolerance = 0.0001f;
+
+        private readonly GameObject _prefab;
+        private readonly WallMountedVisualDepthMutation<Transform>
+            _visualDepthMutation;
+
+        public PreparedBuiltVisualDepthMutation(
+            GameObject prefab,
+            IReadOnlyList<Transform> ingredientTransforms,
+            Bounds originalVisualBounds,
+            WallMountedVisualDepthLayout layout)
+        {
+            _prefab = prefab;
+            _visualDepthMutation =
+                new WallMountedVisualDepthMutation<Transform>(
+                    ingredientTransforms,
+                    layout,
+                    static transform => transform.localPosition.z,
+                    static (transform, depth) =>
+                    {
+                        Vector3 position = transform.localPosition;
+                        position.z = depth;
+                        transform.localPosition = position;
+                    });
+
+            Bounds adjustedVisualBounds = originalVisualBounds;
+            Vector3 adjustedCenter = adjustedVisualBounds.center;
+            adjustedCenter.z = layout.TranslateDepth(adjustedCenter.z);
+            adjustedVisualBounds.center = adjustedCenter;
+            AdjustedVisualBounds = adjustedVisualBounds;
+        }
+
+        public Bounds AdjustedVisualBounds { get; }
+
+        public void Apply()
+        {
+            _visualDepthMutation.Apply();
+
+            if (Mathf.Abs(
+                    AdjustedVisualBounds.min.z -
+                    WallMountedVisualDepthPolicy.SurfaceClearance) >
+                DepthValidationTolerance)
+            {
+                throw new InvalidOperationException(
+                    $"Completed prefab '{_prefab.name}' must keep all neon geometry in front of " +
+                    $"its wall anchor plane; expected minimum depth " +
+                    $"{WallMountedVisualDepthPolicy.SurfaceClearance:F4}, but found " +
+                    $"{AdjustedVisualBounds.min.z:F4}.");
+            }
+        }
+
+        public void Restore()
+        {
+            _visualDepthMutation.Restore();
         }
     }
 
