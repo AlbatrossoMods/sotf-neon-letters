@@ -394,13 +394,18 @@ public static class NeonLetterSmallBlueprint
             CapturePlacementRestoreAction(craftingNode, recipe);
         PreparedBuiltVisualDepthMutation builtVisualDepth =
             PrepareBuiltVisualDepth(recipe, definition);
+        PreparedBuiltVisualDepthMutation craftingNodeVisualDepth =
+            PrepareCraftingNodeVisualDepth(craftingNode, definition);
         PreparedColliderMutation builtCollider =
             PrepareBuiltPrefabCollider(
                 recipe,
                 definition,
                 builtVisualDepth.AdjustedVisualBounds);
         PreparedColliderMutation craftingNodeCollider =
-            PrepareCraftingNodeCollider(craftingNode, definition);
+            PrepareCraftingNodeCollider(
+                craftingNode,
+                definition,
+                craftingNodeVisualDepth.AdjustedVisualBounds);
         Texture2D recipeImage = Assets.GetBookIcon(definition.Symbol);
         if (recipeImage == null)
         {
@@ -431,6 +436,9 @@ public static class NeonLetterSmallBlueprint
                 transaction.Apply(
                     builtCollider.Apply,
                     builtCollider.Restore);
+                transaction.Apply(
+                    craftingNodeVisualDepth.Apply,
+                    craftingNodeVisualDepth.Restore);
                 if (craftingNodeCollider != null)
                 {
                     transaction.Apply(
@@ -531,40 +539,54 @@ public static class NeonLetterSmallBlueprint
                 $"Recipe {recipe.Id} has no completed prefab whose wall depth can be normalized.");
         }
 
-        Transform visualRoot = FindColliderVisualRoot(builtPrefab, definition);
-        Bounds visualBounds = CalculateLocalRendererBounds(builtPrefab, visualRoot);
+        return PrepareVisualDepth(builtPrefab, definition);
+    }
+
+    private static PreparedBuiltVisualDepthMutation
+        PrepareCraftingNodeVisualDepth(
+            StructureCraftingNode craftingNode,
+            NeonLetterSmallDefinition definition)
+    {
+        return PrepareVisualDepth(craftingNode.gameObject, definition);
+    }
+
+    private static PreparedBuiltVisualDepthMutation PrepareVisualDepth(
+        GameObject prefab,
+        NeonLetterSmallDefinition definition)
+    {
+        Transform visualRoot = FindColliderVisualRoot(prefab, definition);
+        Bounds visualBounds = CalculateLocalRendererBounds(prefab, visualRoot);
         WallMountedVisualDepthLayout layout =
             WallMountedVisualDepthPolicy.Resolve(
                 visualBounds.min.z,
                 visualBounds.max.z);
 
         var ingredientTransforms = new List<Transform>(definition.Ingredients.Count);
+        Transform[] prefabTransforms =
+            prefab.GetComponentsInChildren<Transform>(true);
         foreach (NeonLetterSmallDefinition.IngredientDefinition ingredient
                  in definition.Ingredients)
         {
             Transform matchingTransform = null;
             int matchCount = 0;
-            for (int childIndex = 0;
-                 childIndex < builtPrefab.transform.childCount;
-                 childIndex++)
+            foreach (Transform candidate in prefabTransforms)
             {
-                Transform child = builtPrefab.transform.GetChild(childIndex);
                 if (!string.Equals(
-                        child.name,
+                        candidate.name,
                         ingredient.ChildName,
                         StringComparison.Ordinal))
                 {
                     continue;
                 }
 
-                matchingTransform = child;
+                matchingTransform = candidate;
                 matchCount++;
             }
 
             if (matchCount != 1)
             {
                 throw new InvalidOperationException(
-                    $"Completed prefab '{builtPrefab.name}' must contain exactly one top-level " +
+                    $"Wall-mounted prefab '{prefab.name}' must contain exactly one " +
                     $"ingredient visual named '{ingredient.ChildName}', but found {matchCount}.");
             }
 
@@ -572,7 +594,7 @@ public static class NeonLetterSmallBlueprint
         }
 
         return new PreparedBuiltVisualDepthMutation(
-            builtPrefab,
+            prefab,
             ingredientTransforms,
             visualBounds,
             layout);
@@ -580,7 +602,8 @@ public static class NeonLetterSmallBlueprint
 
     private static PreparedColliderMutation PrepareCraftingNodeCollider(
         StructureCraftingNode craftingNode,
-        NeonLetterSmallDefinition definition)
+        NeonLetterSmallDefinition definition,
+        Bounds visualBounds)
     {
         BoxCollider collider = craftingNode.GetComponent<BoxCollider>();
         if (collider == null)
@@ -588,12 +611,7 @@ public static class NeonLetterSmallBlueprint
             return null;
         }
 
-        GameObject craftingNodeObject = craftingNode.gameObject;
-        Transform visualRoot = FindColliderVisualRoot(craftingNodeObject, definition);
-        return PrepareBounds(
-            collider,
-            CalculateLocalRendererBounds(craftingNodeObject, visualRoot),
-            definition);
+        return PrepareBounds(collider, visualBounds, definition);
     }
 
     private static PreparedColliderMutation PrepareBounds(
@@ -601,12 +619,20 @@ public static class NeonLetterSmallBlueprint
         Bounds visualBounds,
         NeonLetterSmallDefinition definition)
     {
+        Vector3 colliderSize = CreateColliderSize(
+            visualBounds.size,
+            definition);
+        Vector3 colliderCenter = visualBounds.center;
+        colliderCenter.z =
+            WallMountedVisualDepthPolicy.ResolveColliderCenterDepth(
+                colliderCenter.z,
+                colliderSize.z);
         return new PreparedColliderMutation(
             collider,
             collider.center,
             collider.size,
-            visualBounds.center,
-            CreateColliderSize(visualBounds.size, definition));
+            colliderCenter,
+            colliderSize);
     }
 
     private static Vector3 CreateColliderSize(
@@ -756,6 +782,8 @@ public static class NeonLetterSmallBlueprint
             recipe._allowParentingWithScrewStructures;
         bool allowFreeFormStructureParenting =
             recipe._allowParentingWithFreeFormStructures;
+        bool useFreeFormStructures = recipe._useFreeFormStructures;
+        bool autoFoundation = recipe._autoFoundation;
         bool useOverridePlacementSize = recipe._useOverridePlacementSize;
         float placementDepthSizeRatio = recipe._placementDepthSizeRatio;
         StructureRecipe dynamicParentRecipeOverride =
@@ -791,6 +819,8 @@ public static class NeonLetterSmallBlueprint
                 allowScrewStructureParenting;
             recipe._allowParentingWithFreeFormStructures =
                 allowFreeFormStructureParenting;
+            recipe._useFreeFormStructures = useFreeFormStructures;
+            recipe._autoFoundation = autoFoundation;
             recipe._useOverridePlacementSize = useOverridePlacementSize;
             recipe._placementDepthSizeRatio = placementDepthSizeRatio;
             recipe._dynamicParentRecipeOverride =
@@ -883,7 +913,7 @@ public static class NeonLetterSmallBlueprint
                 DepthValidationTolerance)
             {
                 throw new InvalidOperationException(
-                    $"Completed prefab '{_prefab.name}' must keep all neon geometry in front of " +
+                    $"Wall-mounted prefab '{_prefab.name}' must keep its neon geometry in front of " +
                     $"its wall anchor plane; expected minimum depth " +
                     $"{WallMountedVisualDepthPolicy.SurfaceClearance:F4}, but found " +
                     $"{AdjustedVisualBounds.min.z:F4}.");
@@ -989,6 +1019,8 @@ public static class NeonLetterSmallBlueprint
             _recipe._allowParentingWithDynamicObjects,
             _recipe._allowParentingWithScrewStructures,
             _recipe._allowParentingWithFreeFormStructures,
+            _recipe._useFreeFormStructures,
+            _recipe._autoFoundation,
             _recipe._useOverridePlacementSize,
             _recipe._placementDepthSizeRatio);
 
@@ -1048,6 +1080,16 @@ public static class NeonLetterSmallBlueprint
                 _recipe._allowParentingWithFreeFormStructures = value;
                 _recipe._freeformParentRecipeOverride = null;
             }
+        }
+
+        public bool UseFreeFormStructures
+        {
+            set => _recipe._useFreeFormStructures = value;
+        }
+
+        public bool AutoFoundation
+        {
+            set => _recipe._autoFoundation = value;
         }
 
         public bool UseOverridePlacementSize { set => _recipe._useOverridePlacementSize = value; }

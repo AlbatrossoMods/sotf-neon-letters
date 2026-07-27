@@ -18,6 +18,8 @@ public sealed class LegacyRuntimeMutationBehaviorTests
                 AllowDynamicObjectParenting: true,
                 AllowScrewStructureParenting: true,
                 AllowFreeFormStructureParenting: true,
+                UseFreeFormStructures: false,
+                AutoFoundation: false,
                 UseOverridePlacementSize: false),
             (
                 placement.AlignToSurface,
@@ -27,7 +29,24 @@ public sealed class LegacyRuntimeMutationBehaviorTests
                 placement.AllowDynamicObjectParenting,
                 placement.AllowScrewStructureParenting,
                 placement.AllowFreeFormStructureParenting,
+                placement.UseFreeFormStructures,
+                placement.AutoFoundation,
                 placement.UseOverridePlacementSize));
+    }
+
+    [Fact]
+    public void WallMountedPlacementDisablesInheritedGroundOnlyLookupModes()
+    {
+        var target = new PlacementRetentionTarget();
+        Assert.True(target.UseFreeFormStructures);
+        Assert.True(target.AutoFoundation);
+
+        RecipePlacementApplicator.Apply(
+            NeonLetterASmallDefinition.Placement,
+            target);
+
+        Assert.False(target.UseFreeFormStructures);
+        Assert.False(target.AutoFoundation);
     }
 
     [Fact]
@@ -255,6 +274,8 @@ public sealed class LegacyRuntimeMutationBehaviorTests
                     AllowDynamicObjectParenting,
                     AllowScrewStructureParenting,
                     AllowFreeFormStructureParenting,
+                    UseFreeFormStructures,
+                    AutoFoundation,
                     UseOverridePlacementSize,
                     PlacementDepthSizeRatio);
                 return RetainSnapshot
@@ -283,6 +304,8 @@ public sealed class LegacyRuntimeMutationBehaviorTests
         public bool AllowDynamicObjectParenting { get; set; }
         public bool AllowScrewStructureParenting { get; set; }
         public bool AllowFreeFormStructureParenting { get; set; }
+        public bool UseFreeFormStructures { get; set; } = true;
+        public bool AutoFoundation { get; set; } = true;
         public bool UseOverridePlacementSize { get; set; }
         public float PlacementDepthSizeRatio { get; set; }
 

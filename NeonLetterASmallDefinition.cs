@@ -39,6 +39,8 @@ public static class NeonLetterASmallDefinition
         AllowDynamicObjectParenting: true,
         AllowScrewStructureParenting: true,
         AllowFreeFormStructureParenting: true,
+        UseFreeFormStructures: false,
+        AutoFoundation: false,
         UseOverridePlacementSize: false,
         PlacementDepthSizeRatio: 0.5f);
 
@@ -91,6 +93,8 @@ public static class NeonLetterASmallDefinition
         bool AllowDynamicObjectParenting,
         bool AllowScrewStructureParenting,
         bool AllowFreeFormStructureParenting,
+        bool UseFreeFormStructures,
+        bool AutoFoundation,
         bool UseOverridePlacementSize,
         float PlacementDepthSizeRatio);
 

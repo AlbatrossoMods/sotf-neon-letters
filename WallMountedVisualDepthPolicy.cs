@@ -53,6 +53,29 @@ public static class WallMountedVisualDepthPolicy
             minimumDepth + outwardTranslation,
             maximumDepth + outwardTranslation);
     }
+
+    public static float ResolveColliderCenterDepth(
+        float visualCenterDepth,
+        float colliderDepth)
+    {
+        if (!float.IsFinite(visualCenterDepth))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(visualCenterDepth),
+                "A wall-mounted collider must start from a finite visual center depth.");
+        }
+
+        if (!float.IsFinite(colliderDepth) || colliderDepth <= 0f)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(colliderDepth),
+                "A wall-mounted collider depth must be finite and positive.");
+        }
+
+        float minimumCenterDepth =
+            SurfaceClearance + colliderDepth / 2f;
+        return Math.Max(visualCenterDepth, minimumCenterDepth);
+    }
 }
 
 internal sealed class WallMountedVisualDepthMutation<TTarget>
@@ -78,7 +101,7 @@ internal sealed class WallMountedVisualDepthMutation<TTarget>
         if (targets.Count == 0)
         {
             throw new ArgumentException(
-                "At least one completed-prefab visual is required.",
+                "At least one wall-mounted prefab visual is required.",
                 nameof(targets));
         }
 
@@ -92,14 +115,14 @@ internal sealed class WallMountedVisualDepthMutation<TTarget>
         {
             TTarget target = targets[index] ??
                 throw new ArgumentException(
-                    $"Completed-prefab visual at index {index} is null.",
+                    $"Wall-mounted prefab visual at index {index} is null.",
                     nameof(targets));
             float originalDepth = readDepth(target);
             if (!float.IsFinite(originalDepth))
             {
                 throw new ArgumentOutOfRangeException(
                     nameof(targets),
-                    $"Completed-prefab visual at index {index} has a non-finite local depth.");
+                    $"Wall-mounted prefab visual at index {index} has a non-finite local depth.");
             }
 
             _targets[index] = target;
@@ -120,7 +143,7 @@ internal sealed class WallMountedVisualDepthMutation<TTarget>
                 DepthValidationTolerance)
             {
                 throw new InvalidOperationException(
-                    $"Completed-prefab visual at index {index} did not retain its outward " +
+                    $"Wall-mounted prefab visual at index {index} did not retain its outward " +
                     $"wall-depth translation; expected {expectedDepth:F4}, but found " +
                     $"{actualDepth:F4}.");
             }

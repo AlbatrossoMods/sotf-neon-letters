@@ -371,6 +371,8 @@ void CheckPlacementApplication()
             nameof(IRecipePlacementTarget.AllowDynamicObjectParenting),
             nameof(IRecipePlacementTarget.AllowScrewStructureParenting),
             nameof(IRecipePlacementTarget.AllowFreeFormStructureParenting),
+            nameof(IRecipePlacementTarget.UseFreeFormStructures),
+            nameof(IRecipePlacementTarget.AutoFoundation),
             nameof(IRecipePlacementTarget.UseOverridePlacementSize),
             nameof(IRecipePlacementTarget.PlacementDepthSizeRatio)
         },
@@ -4460,6 +4462,8 @@ sealed class FakePlacementTarget : IRecipePlacementTarget
         AllowDynamicObjectParenting,
         AllowScrewStructureParenting,
         AllowFreeFormStructureParenting,
+        UseFreeFormStructures,
+        AutoFoundation,
         UseOverridePlacementSize,
         PlacementDepthSizeRatio);
     private NeonLetterASmallDefinition.PlacementAnchor _anchor;
@@ -4472,6 +4476,8 @@ sealed class FakePlacementTarget : IRecipePlacementTarget
     private bool _allowDynamicObjectParenting;
     private bool _allowScrewStructureParenting;
     private bool _allowFreeFormStructureParenting;
+    private bool _useFreeFormStructures = true;
+    private bool _autoFoundation = true;
     private bool _useOverridePlacementSize;
     private float _placementDepthSizeRatio;
     private bool _dynamicParentOverrideCleared;
@@ -4562,6 +4568,24 @@ sealed class FakePlacementTarget : IRecipePlacementTarget
             _allowFreeFormStructureParenting = value;
             _freeFormParentOverrideCleared = true;
             AppliedOperations.Add(nameof(AllowFreeFormStructureParenting));
+        }
+    }
+    public bool UseFreeFormStructures
+    {
+        get => _useFreeFormStructures;
+        set
+        {
+            _useFreeFormStructures = value;
+            AppliedOperations.Add(nameof(UseFreeFormStructures));
+        }
+    }
+    public bool AutoFoundation
+    {
+        get => _autoFoundation;
+        set
+        {
+            _autoFoundation = value;
+            AppliedOperations.Add(nameof(AutoFoundation));
         }
     }
     public bool UseOverridePlacementSize

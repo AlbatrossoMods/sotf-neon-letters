@@ -20,6 +20,8 @@ public interface IRecipePlacementTarget
     bool AllowDynamicObjectParenting { set; }
     bool AllowScrewStructureParenting { set; }
     bool AllowFreeFormStructureParenting { set; }
+    bool UseFreeFormStructures { set; }
+    bool AutoFoundation { set; }
     bool UseOverridePlacementSize { set; }
     float PlacementDepthSizeRatio { set; }
 
@@ -56,6 +58,8 @@ public static class RecipePlacementApplicator
         target.AllowDynamicObjectParenting = placement.AllowDynamicObjectParenting;
         target.AllowScrewStructureParenting = placement.AllowScrewStructureParenting;
         target.AllowFreeFormStructureParenting = placement.AllowFreeFormStructureParenting;
+        target.UseFreeFormStructures = placement.UseFreeFormStructures;
+        target.AutoFoundation = placement.AutoFoundation;
         target.UseOverridePlacementSize = placement.UseOverridePlacementSize;
         target.PlacementDepthSizeRatio = placement.PlacementDepthSizeRatio;
 
