@@ -35,6 +35,7 @@
         <Compile Include="NeonLetterSmallCatalog.cs" />
         <Compile Include="NeonLetterPrefabCloneActivationPolicy.cs" />
         <Compile Include="WallMountedVisualDepthPolicy.cs" />
+        <Compile Include="NeonLetterWallPlacementPolicy.cs" />
     </ItemGroup>
 
     <ItemGroup>
