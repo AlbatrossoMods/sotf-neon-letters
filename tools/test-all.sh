@@ -46,6 +46,10 @@ fi
 
 "$dotnet" "${contract_arguments[@]}"
 
+if [[ "${SOTF_NEON_COLD_RELEASE_ACTIVE:-}" != "1" ]]; then
+  "$repo_root/tools/test-mutation.sh"
+fi
+
 "$repo_root/tools/test-unity-assets.sh"
 
 "$dotnet" "${build_arguments[@]}"

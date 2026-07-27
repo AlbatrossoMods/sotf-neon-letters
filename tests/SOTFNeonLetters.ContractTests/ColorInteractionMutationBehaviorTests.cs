@@ -148,7 +148,6 @@ public sealed class ColorInteractionMutationBehaviorTests
             lifecycle.Observe(
                 new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
                     IsOwnedColorInteraction: false,
-                    UsesNativeUseAction: true,
                     HasInteractionGui: true,
                     HasDynamicInputIcon: true,
                     prompt));
@@ -188,7 +187,6 @@ public sealed class ColorInteractionMutationBehaviorTests
         lifecycle.Observe(
             new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
                 IsOwnedColorInteraction: false,
-                UsesNativeUseAction: true,
                 HasInteractionGui: true,
                 HasDynamicInputIcon: true,
                 prompt));
@@ -218,7 +216,6 @@ public sealed class ColorInteractionMutationBehaviorTests
         lifecycle.Observe(
             new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
                 IsOwnedColorInteraction: false,
-                UsesNativeUseAction: true,
                 HasInteractionGui: true,
                 HasDynamicInputIcon: true,
                 new TrackedPrompt()));

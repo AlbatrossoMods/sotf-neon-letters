@@ -365,6 +365,7 @@ void CheckPlacementApplication()
     CheckSequence(
         new[]
         {
+            nameof(IRecipePlacementTarget.EnableDemolitionMode),
             nameof(IRecipePlacementTarget.RemoveGroundPlacementChecks),
             nameof(IRecipePlacementTarget.Anchor),
             nameof(IRecipePlacementTarget.CastRadiusFormula),
@@ -4446,9 +4447,14 @@ void CheckSequence<T>(IEnumerable<T> expected, IEnumerable<T> actual, string tes
 
 }
 
-sealed class FakePlacementTarget : IRecipePlacementTarget
+sealed class FakePlacementTarget :
+    IRecipePlacementTarget,
+    IRecipeRelocationTarget<object>
 {
+    public bool DemolitionModeEnabled { get; private set; }
     public bool GroundPlacementChecksRemoved { get; private set; }
+    public int RelocateModeValue { get; set; }
+    public object? RelocateRecipeOverride { get; set; } = new();
     public List<string> AppliedOperations { get; } = new();
     public bool ParentRecipeOverridesCleared =>
         _dynamicParentOverrideCleared &&
@@ -4606,6 +4612,14 @@ sealed class FakePlacementTarget : IRecipePlacementTarget
     {
         get => _placementDepthSizeRatio;
         set { _placementDepthSizeRatio = value; AppliedOperations.Add(nameof(PlacementDepthSizeRatio)); }
+    }
+
+    public void EnableDemolitionMode()
+    {
+        RecipeDemolitionApplicator.Apply(this);
+        DemolitionModeEnabled =
+            RecipeDemolitionApplicator.IsApplied(this);
+        AppliedOperations.Add(nameof(EnableDemolitionMode));
     }
 
     public void RemoveGroundPlacementChecks()

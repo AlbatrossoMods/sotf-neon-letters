@@ -54,14 +54,12 @@ public static partial class NeonLetterColorRuntime
                 prompt == null
                     ? null
                     : prompt.GetComponentInChildren<DynamicInputIcon>(true);
+            // The cloned prompt is rebound to NativeUseAction, so the
+            // source interaction can use any native action.
             NeonLetterColorInteractionPromptObservationResult result =
                 PromptLifecycle.Observe(
                     new NeonLetterColorInteractionPromptCandidate<GameObject>(
                         IsOwnedColorInteraction: isOwned,
-                        UsesNativeUseAction: string.Equals(
-                            interaction._actionId,
-                            NativeUseAction,
-                            StringComparison.Ordinal),
                         HasInteractionGui: prompt != null,
                         HasDynamicInputIcon: inputIcon != null,
                         prompt));
@@ -349,7 +347,8 @@ public static partial class NeonLetterColorRuntime
 
         RLog.Error(
             "[SOTFNeonLetters] Native color interaction is waiting for a " +
-            "compatible vanilla Use prompt. The mod will retry; no raw-key " +
+            "compatible vanilla interaction prompt. The mod will keep " +
+            "observing native interaction lifecycle events; no raw-key " +
             "fallback was installed.");
     }
 

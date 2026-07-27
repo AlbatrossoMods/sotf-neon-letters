@@ -2,8 +2,91 @@
 
 namespace SOTFNeonLetters;
 
+/// <summary>
+/// Exposes the native recipe values that control relocation and demolition.
+/// </summary>
+/// <typeparam name="TRecipe">The native recipe reference type.</typeparam>
+public interface IRecipeRelocationTarget<TRecipe>
+    where TRecipe : class
+{
+    int RelocateModeValue { get; set; }
+    TRecipe? RelocateRecipeOverride { get; set; }
+}
+
+/// <summary>
+/// Stores the relocation values captured before a reversible recipe mutation.
+/// </summary>
+/// <typeparam name="TRecipe">The native recipe reference type.</typeparam>
+public readonly record struct RecipeRelocationState<TRecipe>(
+    int RelocateModeValue,
+    TRecipe? RelocateRecipeOverride)
+    where TRecipe : class;
+
+/// <summary>
+/// Applies the demolition-only recipe values used by native structure removal.
+/// </summary>
+public static class RecipeDemolitionApplicator
+{
+    private const int CollapseModeValue = 1;
+
+    /// <summary>
+    /// Captures both relocation values before a reversible recipe mutation.
+    /// </summary>
+    public static RecipeRelocationState<TRecipe> Capture<TRecipe>(
+        IRecipeRelocationTarget<TRecipe> target)
+        where TRecipe : class
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        return new RecipeRelocationState<TRecipe>(
+            target.RelocateModeValue,
+            target.RelocateRecipeOverride);
+    }
+
+    /// <summary>
+    /// Replaces relocation with native collapse and removes its recipe override.
+    /// </summary>
+    public static void Apply<TRecipe>(
+        IRecipeRelocationTarget<TRecipe> target)
+        where TRecipe : class
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        target.RelocateModeValue = CollapseModeValue;
+        target.RelocateRecipeOverride = null;
+    }
+
+    /// <summary>
+    /// Returns whether the target retains the native demolition-only values.
+    /// </summary>
+    public static bool IsApplied<TRecipe>(
+        IRecipeRelocationTarget<TRecipe> target)
+        where TRecipe : class
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        return target.RelocateModeValue == CollapseModeValue &&
+               target.RelocateRecipeOverride == null;
+    }
+
+    /// <summary>
+    /// Restores both relocation values captured before the mutation.
+    /// </summary>
+    public static void Restore<TRecipe>(
+        IRecipeRelocationTarget<TRecipe> target,
+        RecipeRelocationState<TRecipe> state)
+        where TRecipe : class
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        target.RelocateModeValue = state.RelocateModeValue;
+        target.RelocateRecipeOverride =
+            state.RelocateRecipeOverride;
+    }
+}
+
 public interface IRecipePlacementTarget
 {
+    /// <summary>
+    /// Gets whether dismantling collapses the structure instead of entering relocation.
+    /// </summary>
+    bool DemolitionModeEnabled { get; }
     bool GroundPlacementChecksRemoved { get; }
     bool ParentRecipeOverridesCleared { get; }
     NeonLetterASmallDefinition.PlacementDefinition Snapshot { get; }
@@ -25,6 +108,10 @@ public interface IRecipePlacementTarget
     bool UseOverridePlacementSize { set; }
     float PlacementDepthSizeRatio { set; }
 
+    /// <summary>
+    /// Configures dismantling to collapse the structure instead of relocating it.
+    /// </summary>
+    void EnableDemolitionMode();
     void RemoveGroundPlacementChecks();
     void SetInitialRotation(float x, float y, float z);
 }
@@ -40,6 +127,7 @@ public static class RecipePlacementApplicator
         // SonsSdk 0.8.6 creates custom recipes by cloning ground recipe 25.
         // Replace the complete placement contract so none of its floor-only
         // fields or providers can leak into the wall-mounted blueprint.
+        target.EnableDemolitionMode();
         target.RemoveGroundPlacementChecks();
         target.Anchor = placement.Anchor;
         target.CastRadiusFormula = placement.CastRadiusFormula;
@@ -63,7 +151,8 @@ public static class RecipePlacementApplicator
         target.UseOverridePlacementSize = placement.UseOverridePlacementSize;
         target.PlacementDepthSizeRatio = placement.PlacementDepthSizeRatio;
 
-        if (!target.GroundPlacementChecksRemoved ||
+        if (!target.DemolitionModeEnabled ||
+            !target.GroundPlacementChecksRemoved ||
             !target.ParentRecipeOverridesCleared ||
             target.Snapshot != placement)
         {

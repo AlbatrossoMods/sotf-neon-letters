@@ -414,7 +414,6 @@ internal sealed class
 internal readonly record struct
     NeonLetterColorInteractionPromptCandidate<TTemplate>(
         bool IsOwnedColorInteraction,
-        bool UsesNativeUseAction,
         bool HasInteractionGui,
         bool HasDynamicInputIcon,
         TTemplate Template)
@@ -453,7 +452,6 @@ internal sealed class
         NeonLetterColorInteractionPromptCandidate<TTemplate> candidate)
     {
         if (candidate.IsOwnedColorInteraction ||
-            !candidate.UsesNativeUseAction ||
             !candidate.HasInteractionGui ||
             !candidate.HasDynamicInputIcon ||
             candidate.Template == null)

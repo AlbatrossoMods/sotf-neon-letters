@@ -392,7 +392,10 @@ public static class NeonLetterSmallBlueprint
         var placementTarget =
             new SonsRecipePlacementTarget(craftingNode, recipe);
         Action restorePlacement =
-            CapturePlacementRestoreAction(craftingNode, recipe);
+            CapturePlacementRestoreAction(
+                craftingNode,
+                recipe,
+                placementTarget);
         PreparedBuiltVisualDepthMutation builtVisualDepth =
             PrepareBuiltVisualDepth(recipe, definition);
         PreparedBuiltVisualDepthMutation craftingNodeVisualDepth =
@@ -760,10 +763,13 @@ public static class NeonLetterSmallBlueprint
 
     private static Action CapturePlacementRestoreAction(
         StructureCraftingNode craftingNode,
-        StructureRecipe recipe)
+        StructureRecipe recipe,
+        IRecipeRelocationTarget<StructureRecipe> relocationTarget)
     {
         var groundOffsetProvider = craftingNode.GroundOffsetProvider;
         var groundPresenceProvider = craftingNode.GroundPresenceProvider;
+        RecipeRelocationState<StructureRecipe> relocationState =
+            RecipeDemolitionApplicator.Capture(relocationTarget);
         StructureRecipe.AnchorType anchor = recipe._anchor;
         StructureRecipe.CastRadiusFormulas castRadiusFormula =
             recipe._castRadiusFormula;
@@ -802,6 +808,9 @@ public static class NeonLetterSmallBlueprint
                 groundOffsetProvider == null ? null : groundOffsetProvider;
             craftingNode.GroundPresenceProvider =
                 groundPresenceProvider == null ? null : groundPresenceProvider;
+            RecipeDemolitionApplicator.Restore(
+                relocationTarget,
+                relocationState);
             recipe._anchor = anchor;
             recipe._castRadiusFormula = castRadiusFormula;
             recipe._alignToSurface = alignToSurface;
@@ -948,7 +957,9 @@ public static class NeonLetterSmallBlueprint
             Transform Transform)> IngredientTargets { get; }
     }
 
-    private sealed class SonsRecipePlacementTarget : IRecipePlacementTarget
+    private sealed class SonsRecipePlacementTarget :
+        IRecipePlacementTarget,
+        IRecipeRelocationTarget<StructureRecipe>
     {
         private readonly StructureCraftingNode _craftingNode;
         private readonly StructureRecipe _recipe;
@@ -984,6 +995,22 @@ public static class NeonLetterSmallBlueprint
             (_craftingNode.GroundOffsetProvider == null &&
              _craftingNode.GroundPresenceProvider == null &&
              _craftingNode.GetComponent<GroundOffsetProvider>() == null);
+
+        public bool DemolitionModeEnabled =>
+            RecipeDemolitionApplicator.IsApplied(this);
+
+        public int RelocateModeValue
+        {
+            get => (int)_recipe._relocateMode;
+            set => _recipe._relocateMode =
+                (StructureRecipe.RelocateModeType)value;
+        }
+
+        public StructureRecipe RelocateRecipeOverride
+        {
+            get => _recipe._relocateRecipeOverride;
+            set => _recipe._relocateRecipeOverride = value;
+        }
 
         public bool ParentRecipeOverridesCleared =>
             _recipe._dynamicParentRecipeOverride == null &&
@@ -1095,6 +1122,11 @@ public static class NeonLetterSmallBlueprint
 
         public bool UseOverridePlacementSize { set => _recipe._useOverridePlacementSize = value; }
         public float PlacementDepthSizeRatio { set => _recipe._placementDepthSizeRatio = value; }
+
+        public void EnableDemolitionMode()
+        {
+            RecipeDemolitionApplicator.Apply(this);
+        }
 
         public void RemoveGroundPlacementChecks()
         {

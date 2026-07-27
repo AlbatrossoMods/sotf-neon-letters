@@ -631,7 +631,24 @@ public sealed class NativeColorInteractionTests
     }
 
     [Fact]
-    public void ObservedNativeUsePromptStartsPendingBackfill()
+    public void MissingPromptDiagnosticRequestsAStructurallyCompatibleVanillaPrompt()
+    {
+        string runtimeSource = File.ReadAllText(
+            FindRepositoryFile("NeonLetterColorInteractionRuntime.cs"));
+
+        Assert.Equal(
+            (true, false),
+            (
+                runtimeSource.Contains(
+                    "compatible vanilla interaction prompt",
+                    StringComparison.Ordinal),
+                runtimeSource.Contains(
+                    "compatible vanilla Use prompt",
+                    StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public void StructurallyCompatibleVanillaPromptIsRetainedAsInteractionTemplate()
     {
         var prompt = new TrackedPrompt();
         var lifecycle =
@@ -642,7 +659,6 @@ public sealed class NativeColorInteractionTests
             lifecycle.Observe(
                 new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
                     IsOwnedColorInteraction: false,
-                    UsesNativeUseAction: true,
                     HasInteractionGui: true,
                     HasDynamicInputIcon: true,
                     prompt));
@@ -651,8 +667,28 @@ public sealed class NativeColorInteractionTests
             (
                 NeonLetterColorInteractionPromptObservationResult.Accepted,
                 true,
-                1UL),
-            (result, lifecycle.IsBackfillPending, lifecycle.Generation));
+                prompt),
+            (
+                result,
+                lifecycle.TryGetTemplate(out TrackedPrompt? resolved),
+                resolved));
+    }
+
+    [Fact]
+    public void NativeInteractionLeaseRebindsTheClonedPromptAndProxyToUse()
+    {
+        string leaseSource = File.ReadAllText(
+            FindRepositoryFile("NeonLetterColorInteractionLeaseRuntime.cs"));
+
+        Assert.Equal(
+            (true, true),
+            (
+                leaseSource.Contains(
+                    "inputIcon.SetActionId(NativeUseAction)",
+                    StringComparison.Ordinal),
+                leaseSource.Contains(
+                    "interaction._actionId = NativeUseAction",
+                    StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -666,7 +702,6 @@ public sealed class NativeColorInteractionTests
             lifecycle.Observe(
                 new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
                     IsOwnedColorInteraction: true,
-                    UsesNativeUseAction: true,
                     HasInteractionGui: true,
                     HasDynamicInputIcon: true,
                     new TrackedPrompt()));
@@ -677,11 +712,9 @@ public sealed class NativeColorInteractionTests
     }
 
     [Theory]
-    [InlineData(false, true, true)]
-    [InlineData(true, false, true)]
-    [InlineData(true, true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
     public void InvalidNativePromptCandidateIsIgnored(
-        bool usesNativeUseAction,
         bool hasInteractionGui,
         bool hasDynamicInputIcon)
     {
@@ -693,7 +726,6 @@ public sealed class NativeColorInteractionTests
             lifecycle.Observe(
                 new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
                     IsOwnedColorInteraction: false,
-                    usesNativeUseAction,
                     hasInteractionGui,
                     hasDynamicInputIcon,
                     new TrackedPrompt()));
@@ -716,7 +748,6 @@ public sealed class NativeColorInteractionTests
                 false,
                 true,
                 true,
-                true,
                 first));
         first.IsAlive = false;
 
@@ -724,7 +755,6 @@ public sealed class NativeColorInteractionTests
             lifecycle.Observe(
                 new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
                     false,
-                    true,
                     true,
                     true,
                     replacement));
@@ -752,7 +782,6 @@ public sealed class NativeColorInteractionTests
                 false,
                 true,
                 true,
-                true,
                 prompt);
         lifecycle.Observe(candidate);
 
@@ -778,13 +807,11 @@ public sealed class NativeColorInteractionTests
                 false,
                 true,
                 true,
-                true,
                 new TrackedPrompt()));
 
         lifecycle.Observe(
             new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
                 false,
-                true,
                 true,
                 true,
                 new TrackedPrompt()));
@@ -801,7 +828,6 @@ public sealed class NativeColorInteractionTests
         lifecycle.Observe(
             new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
                 false,
-                true,
                 true,
                 true,
                 new TrackedPrompt()));
@@ -842,7 +868,6 @@ public sealed class NativeColorInteractionTests
                 false,
                 true,
                 true,
-                true,
                 new TrackedPrompt()));
 
         lifecycle.ReportBackfillUnavailable();
@@ -853,6 +878,24 @@ public sealed class NativeColorInteractionTests
     private static bool IsRootAlive(TrackedRoot root)
     {
         return root.IsAlive;
+    }
+
+    private static string FindRepositoryFile(string relativePath)
+    {
+        DirectoryInfo? directory = new(AppContext.BaseDirectory);
+        while (directory != null)
+        {
+            string candidate = Path.Combine(directory.FullName, relativePath);
+            if (File.Exists(candidate))
+            {
+                return candidate;
+            }
+
+            directory = directory.Parent;
+        }
+
+        throw new FileNotFoundException(
+            $"Could not locate repository file '{relativePath}'.");
     }
 
     private static long MeasureEmptyLeaseMaintenanceAllocation(

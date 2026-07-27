@@ -283,6 +283,7 @@ public sealed class LegacyRuntimeMutationBehaviorTests
         public bool RetainGroundRemoval { get; init; } = true;
         public bool RetainParentOverrides { get; init; } = true;
         public bool RetainSnapshot { get; init; } = true;
+        public bool DemolitionModeEnabled { get; private set; }
         public bool GroundPlacementChecksRemoved { get; private set; }
         public bool ParentRecipeOverridesCleared => RetainParentOverrides;
         public NeonLetterASmallDefinition.PlacementDefinition Snapshot
@@ -340,6 +341,11 @@ public sealed class LegacyRuntimeMutationBehaviorTests
         public bool AutoFoundation { get; set; } = true;
         public bool UseOverridePlacementSize { get; set; }
         public float PlacementDepthSizeRatio { get; set; }
+
+        public void EnableDemolitionMode()
+        {
+            DemolitionModeEnabled = true;
+        }
 
         public void RemoveGroundPlacementChecks()
         {
