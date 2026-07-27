@@ -702,9 +702,8 @@ public static class NeonLetterSmallBlueprint
 
         return () =>
         {
-            // DestroyImmediate is required by the SDK clone's GetComponent-based validation.
-            // A destroyed provider cannot be recreated safely, but every still-live reference
-            // and all recipe fields remain reversible.
+            // Provider removal is committed only after every reversible recipe mutation succeeds.
+            // Until then, the original references remain available for rollback.
             craftingNode.GroundOffsetProvider =
                 groundOffsetProvider == null ? null : groundOffsetProvider;
             craftingNode.GroundPresenceProvider =
@@ -800,7 +799,8 @@ public static class NeonLetterSmallBlueprint
         private readonly StructureRecipe _recipe;
         private readonly GroundOffsetProviderBase _originalGroundOffsetProvider;
         private readonly GroundOffsetProvider _originalGroundPresenceProvider;
-        private readonly GroundOffsetProvider _providerToDestroy;
+        private readonly GroundOffsetProvider _providerToRemove;
+        private readonly bool _providerWasEnabled;
         private bool _groundRemovalPending;
         private bool _groundRemovalCommitStarted;
         private bool _groundRemovalCommitted;
@@ -815,9 +815,12 @@ public static class NeonLetterSmallBlueprint
                 craftingNode.GroundOffsetProvider;
             _originalGroundPresenceProvider =
                 craftingNode.GroundPresenceProvider;
-            _providerToDestroy =
+            _providerToRemove =
                 _originalGroundPresenceProvider ??
                 craftingNode.GetComponent<GroundOffsetProvider>();
+            _providerWasEnabled =
+                _providerToRemove == null ||
+                _providerToRemove.enabled;
         }
 
         public bool GroundPlacementChecksRemoved =>
@@ -947,6 +950,11 @@ public static class NeonLetterSmallBlueprint
                     _originalGroundOffsetProvider;
                 _craftingNode.GroundPresenceProvider =
                     _originalGroundPresenceProvider;
+                if (_providerToRemove != null)
+                {
+                    _providerToRemove.enabled = _providerWasEnabled;
+                }
+
                 _groundRemovalCommitStarted = false;
             }
 
@@ -966,13 +974,14 @@ public static class NeonLetterSmallBlueprint
                     "Ground-placement provider removal was not prepared.");
             }
 
-            bool hasProviderToDestroy = _providerToDestroy != null;
+            bool hasProviderToRemove = _providerToRemove != null;
             _groundRemovalCommitStarted = true;
             _craftingNode.GroundOffsetProvider = null;
             _craftingNode.GroundPresenceProvider = null;
-            if (hasProviderToDestroy)
+            if (hasProviderToRemove)
             {
-                UnityEngine.Object.DestroyImmediate(_providerToDestroy);
+                _providerToRemove.enabled = false;
+                UnityEngine.Object.Destroy(_providerToRemove);
             }
 
             _groundRemovalPending = false;

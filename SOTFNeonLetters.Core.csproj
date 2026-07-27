@@ -33,6 +33,7 @@
         <Compile Include="NeonLetterLifecyclePolicy.cs" />
         <Compile Include="NeonSymbolManifest.cs" />
         <Compile Include="NeonLetterSmallCatalog.cs" />
+        <Compile Include="NeonLetterPrefabCloneActivationPolicy.cs" />
     </ItemGroup>
 
     <ItemGroup>

@@ -586,7 +586,7 @@ public sealed class BlueprintMaterialTransactionTests
         int failureIndex)
     {
         var operations = new List<string>();
-        var provider = new DeferredProviderRemoval(operations);
+        var provider = new DeferredProviderRetirement(operations);
         var values = new List<string> { "initial" };
 
         Assert.Throws<InvalidOperationException>(
@@ -623,22 +623,22 @@ public sealed class BlueprintMaterialTransactionTests
 
         Assert.Equal(
             (
-                ProviderPresent: true,
+                ProviderEnabled: true,
                 Pending: false,
                 Values: "initial",
-                DestroyCount: 0),
+                RemovalScheduleCount: 0),
             (
-                ProviderPresent: provider.IsPresent,
+                ProviderEnabled: provider.IsEnabled,
                 Pending: provider.IsPending,
                 Values: string.Join(",", values),
-                DestroyCount: provider.DestroyCount));
+                RemovalScheduleCount: provider.RemovalScheduleCount));
     }
 
     [Fact]
-    public void SuccessfulProviderCommitDestroysExactlyOnceAsTheFinalOperation()
+    public void SuccessfulProviderCommitDisablesAndSchedulesRemovalExactlyOnceAsTheFinalOperation()
     {
         var operations = new List<string>();
-        var provider = new DeferredProviderRemoval(operations);
+        var provider = new DeferredProviderRetirement(operations);
 
         NeonLetterCallbackTransaction.Execute(
             transaction =>
@@ -655,22 +655,24 @@ public sealed class BlueprintMaterialTransactionTests
 
         Assert.Equal(
             (
-                ProviderPresent: false,
-                DestroyCount: 1,
-                LastOperation: "destroy-provider"),
+                ProviderEnabled: false,
+                RemovalScheduled: true,
+                RemovalScheduleCount: 1,
+                LastOperation: "schedule-provider-removal"),
             (
-                ProviderPresent: provider.IsPresent,
-                DestroyCount: provider.DestroyCount,
+                ProviderEnabled: provider.IsEnabled,
+                RemovalScheduled: provider.RemovalScheduled,
+                RemovalScheduleCount: provider.RemovalScheduleCount,
                 LastOperation: operations[^1]));
     }
 
     [Fact]
-    public void ProviderCommitFailureBeforeDestroyRollsBackAndKeepsProvider()
+    public void ProviderCommitFailureBeforeRemovalScheduleRollsBackAndKeepsProviderEnabled()
     {
         var operations = new List<string>();
-        var provider = new DeferredProviderRemoval(operations)
+        var provider = new DeferredProviderRetirement(operations)
         {
-            FailBeforeDestroy = true
+            FailBeforeSchedule = true
         };
         var pages = new List<string> { "base-page" };
 
@@ -690,22 +692,55 @@ public sealed class BlueprintMaterialTransactionTests
 
         Assert.Equal(
             (
-                ProviderPresent: true,
+                ProviderEnabled: true,
                 Pending: false,
                 Pages: "base-page",
-                DestroyCount: 0),
+                RemovalScheduleCount: 0),
             (
-                ProviderPresent: provider.IsPresent,
+                ProviderEnabled: provider.IsEnabled,
                 Pending: provider.IsPending,
                 Pages: string.Join(",", pages),
-                DestroyCount: provider.DestroyCount));
+                RemovalScheduleCount: provider.RemovalScheduleCount));
+    }
+
+    [Fact]
+    public void ProviderCommitFailureAfterDisableRestoresProviderForRetry()
+    {
+        var operations = new List<string>();
+        var provider = new DeferredProviderRetirement(operations)
+        {
+            FailAfterDisable = true
+        };
+
+        Assert.Throws<InvalidOperationException>(
+            () => NeonLetterCallbackTransaction.Execute(
+                transaction =>
+                {
+                    transaction.Apply(
+                        provider.MarkPending,
+                        () => operations.Add("rollback-placement"));
+                },
+                provider.Commit,
+                provider.Cancel));
+
+        Assert.Equal(
+            (
+                ProviderEnabled: true,
+                Pending: false,
+                RemovalScheduled: false,
+                RemovalScheduleCount: 0),
+            (
+                ProviderEnabled: provider.IsEnabled,
+                Pending: provider.IsPending,
+                RemovalScheduled: provider.RemovalScheduled,
+                RemovalScheduleCount: provider.RemovalScheduleCount));
     }
 
     [Fact]
     public void CancelFailureStillRunsRollbackAndAggregatesCleanupErrors()
     {
         var operations = new List<string>();
-        var provider = new DeferredProviderRemoval(operations)
+        var provider = new DeferredProviderRetirement(operations)
         {
             FailAfterCancel = true
         };
@@ -734,12 +769,12 @@ public sealed class BlueprintMaterialTransactionTests
         Assert.Equal(
             (
                 ReportedFailures: 3,
-                ProviderPresent: true,
+                ProviderEnabled: true,
                 Pending: false,
                 State: "initial"),
             (
                 ReportedFailures: exception.InnerExceptions.Count,
-                ProviderPresent: provider.IsPresent,
+                ProviderEnabled: provider.IsEnabled,
                 Pending: provider.IsPending,
                 State: state));
     }
@@ -825,7 +860,7 @@ public sealed class BlueprintMaterialTransactionTests
     public void FailedDeferredProviderCallbackCanRetryWithoutDuplicatePages()
     {
         var operations = new List<string>();
-        var provider = new DeferredProviderRemoval(operations);
+        var provider = new DeferredProviderRetirement(operations);
         var pages = new List<string> { "base-page" };
 
         Assert.Throws<InvalidOperationException>(
@@ -862,13 +897,15 @@ public sealed class BlueprintMaterialTransactionTests
         Assert.Equal(
             (
                 Pages: "base-page,page-ab",
-                ProviderPresent: false,
-                DestroyCount: 1,
-                LastOperation: "destroy-provider"),
+                ProviderEnabled: false,
+                RemovalScheduled: true,
+                RemovalScheduleCount: 1,
+                LastOperation: "schedule-provider-removal"),
             (
                 Pages: string.Join(",", pages),
-                ProviderPresent: provider.IsPresent,
-                DestroyCount: provider.DestroyCount,
+                ProviderEnabled: provider.IsEnabled,
+                RemovalScheduled: provider.RemovalScheduled,
+                RemovalScheduleCount: provider.RemovalScheduleCount,
                 LastOperation: operations[^1]));
     }
 
@@ -1613,19 +1650,21 @@ internal sealed record BookPageTargetSnapshot(
     }
 }
 
-internal sealed class DeferredProviderRemoval
+internal sealed class DeferredProviderRetirement
 {
     private readonly List<string> _operations;
 
-    public DeferredProviderRemoval(List<string> operations)
+    public DeferredProviderRetirement(List<string> operations)
     {
         _operations = operations;
     }
 
-    public bool IsPresent { get; private set; } = true;
+    public bool IsEnabled { get; private set; } = true;
     public bool IsPending { get; private set; }
-    public int DestroyCount { get; private set; }
-    public bool FailBeforeDestroy { get; init; }
+    public bool RemovalScheduled { get; private set; }
+    public int RemovalScheduleCount { get; private set; }
+    public bool FailBeforeSchedule { get; init; }
+    public bool FailAfterDisable { get; init; }
     public bool FailAfterCancel { get; init; }
 
     public void MarkPending()
@@ -1637,6 +1676,11 @@ internal sealed class DeferredProviderRemoval
     public void Cancel()
     {
         IsPending = false;
+        if (!RemovalScheduled)
+        {
+            IsEnabled = true;
+        }
+
         if (FailAfterCancel)
         {
             throw new InvalidOperationException(
@@ -1652,15 +1696,22 @@ internal sealed class DeferredProviderRemoval
                 "Provider removal was not prepared.");
         }
 
-        if (FailBeforeDestroy)
+        if (FailBeforeSchedule)
         {
             throw new InvalidOperationException(
-                "provider destruction failed before removal");
+                "provider removal failed before scheduling");
         }
 
-        IsPresent = false;
+        IsEnabled = false;
+        if (FailAfterDisable)
+        {
+            throw new InvalidOperationException(
+                "provider removal failed after disabling");
+        }
+
         IsPending = false;
-        DestroyCount++;
-        _operations.Add("destroy-provider");
+        RemovalScheduled = true;
+        RemovalScheduleCount++;
+        _operations.Add("schedule-provider-removal");
     }
 }
