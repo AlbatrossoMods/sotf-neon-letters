@@ -2,7 +2,7 @@
 
 RedLoader/SonsSdk mod for buildable small neon symbols in Sons of the Forest.
 
-Version 0.3.1 contains 80 small neon symbols: English A-Z, Cyrillic А-Я (including Ё), digits 0-9, and `! # $ & * + , - . = ?`. They are available as forty paired pages in the game's Blueprints book under the `Neon Symbols` page title, in this order: English alphabet, Cyrillic alphabet, digits, then punctuation.
+Version 0.4.0 contains 80 small neon symbols: English A-Z, Cyrillic А-Я (including Ё), digits 0-9, and `! # $ & * + , - . = ?`. They are available as forty paired pages in the game's Blueprints book under the `Neon Symbols` page title, in this order: English alphabet, Cyrillic alphabet, digits, then punctuation.
 
 Each symbol uses the standard SonsSdk placement and crafting flow, costs exactly one Wire (item 418) and one Light Bulb (item 635), and can be mounted on a wall. Completed symbols have a post-build `E`-key color picker.
 
