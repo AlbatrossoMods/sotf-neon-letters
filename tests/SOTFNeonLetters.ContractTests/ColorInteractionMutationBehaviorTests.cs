@@ -138,104 +138,6 @@ public sealed class ColorInteractionMutationBehaviorTests
     }
 
     [Fact]
-    public void DeadPromptClearsItsTemplateAndPendingBackfill()
-    {
-        var prompt = new TrackedPrompt();
-        var lifecycle =
-            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
-                candidate => candidate.IsAlive);
-        NeonLetterColorInteractionPromptObservationResult observed =
-            lifecycle.Observe(
-                new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                    IsOwnedColorInteraction: false,
-                    HasInteractionGui: true,
-                    HasDynamicInputIcon: true,
-                    prompt));
-        prompt.IsAlive = false;
-
-        bool found = lifecycle.TryGetTemplate(
-            out TrackedPrompt? resolved);
-
-        Assert.Equal(
-            (
-                NeonLetterColorInteractionPromptObservationResult.Accepted,
-                false,
-                (TrackedPrompt?)null,
-                false,
-                0,
-                1ul),
-            (
-                observed,
-                found,
-                resolved,
-                lifecycle.IsBackfillPending,
-                lifecycle.RetainedTemplateCount,
-                lifecycle.Generation));
-    }
-
-    [Fact]
-    public void OnlyALivePromptRestartsACompletedBackfillCycle()
-    {
-        var withoutTemplate =
-            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
-                candidate => candidate.IsAlive);
-        withoutTemplate.StartBackfillIfTemplateAvailable();
-        var prompt = new TrackedPrompt();
-        var lifecycle =
-            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
-                candidate => candidate.IsAlive);
-        lifecycle.Observe(
-            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                IsOwnedColorInteraction: false,
-                HasInteractionGui: true,
-                HasDynamicInputIcon: true,
-                prompt));
-        lifecycle.TakeBackfillWindow(
-            itemCount: 1,
-            maximumItems: 1);
-        bool completed = lifecycle.IsBackfillPending;
-
-        lifecycle.StartBackfillIfTemplateAvailable();
-
-        Assert.Equal(
-            (false, false, true, 1, 1ul),
-            (
-                withoutTemplate.IsBackfillPending,
-                completed,
-                lifecycle.IsBackfillPending,
-                lifecycle.RetainedTemplateCount,
-                lifecycle.Generation));
-    }
-
-    [Fact]
-    public void ResetClearsPromptTemplateGenerationAndBackfill()
-    {
-        var lifecycle =
-            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
-                candidate => candidate.IsAlive);
-        lifecycle.Observe(
-            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                IsOwnedColorInteraction: false,
-                HasInteractionGui: true,
-                HasDynamicInputIcon: true,
-                new TrackedPrompt()));
-
-        lifecycle.Reset();
-        bool pending = lifecycle.IsBackfillPending;
-        bool found = lifecycle.TryGetTemplate(
-            out TrackedPrompt? resolved);
-
-        Assert.Equal(
-            (false, (TrackedPrompt?)null, false, 0, 0ul),
-            (
-                found,
-                resolved,
-                pending,
-                lifecycle.RetainedTemplateCount,
-                lifecycle.Generation));
-    }
-
-    [Fact]
     public void BackfillScheduleUsesInclusiveRetryBoundaryWithoutOverflowAndCanReset()
     {
         var schedule = new NeonLetterColorInteractionBackfillSchedule();
@@ -344,8 +246,4 @@ public sealed class ColorInteractionMutationBehaviorTests
         Assert.Equal((0, target), (callbackCount, session.Target));
     }
 
-    private sealed class TrackedPrompt
-    {
-        internal bool IsAlive { get; set; } = true;
-    }
 }

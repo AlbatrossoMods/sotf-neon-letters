@@ -1,6 +1,5 @@
 using HarmonyLib;
 using Sons.Crafting.Structures;
-using Sons.Gameplay;
 
 namespace SOTFNeonLetters;
 
@@ -29,17 +28,5 @@ internal static class NeonLetterColorInteractionUnregisterPatch
     private static void BeforeUnregister(IScrewStructure __0)
     {
         NeonLetterColorRuntime.UnregisterColorInteraction(__0);
-    }
-}
-
-[HarmonyPatch(
-    typeof(GenericInteraction),
-    nameof(GenericInteraction.OnEnable))]
-internal static class NeonLetterColorInteractionPromptObservationPatch
-{
-    [HarmonyPostfix]
-    private static void AfterOnEnable(GenericInteraction __instance)
-    {
-        NeonLetterColorRuntime.ObserveNativeInteractionPrompt(__instance);
     }
 }

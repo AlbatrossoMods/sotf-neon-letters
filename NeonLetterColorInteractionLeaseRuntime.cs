@@ -33,8 +33,7 @@ public static partial class NeonLetterColorRuntime
         ScrewStructure structure,
         GameObject structureRoot,
         int recipeId,
-        NeonLetterColorInteractionGeometry geometry,
-        GameObject promptTemplate)
+        NeonLetterColorInteractionGeometry geometry)
     {
         GameObject interactionHolder =
             new(InteractionHolderName);
@@ -84,22 +83,32 @@ public static partial class NeonLetterColorRuntime
             proxyCollider.radius = geometry.Radius;
             proxyCollider.isTrigger = true;
 
-            GameObject ownedPrompt =
-                UnityEngine.Object.Instantiate<GameObject>(
-                    promptTemplate,
+            Transform promptTransform =
+                SonsUiTools.CreateLinkUi(
                     proxyTransform,
-                    false);
-            ownedPrompt.name = InteractionPromptName;
-            ownedPrompt.SetActive(false);
-            DynamicInputIcon inputIcon =
-                ownedPrompt.GetComponentInChildren<DynamicInputIcon>(true);
-            if (inputIcon == null)
+                    "screen.use");
+            if (promptTransform == null ||
+                promptTransform.gameObject == null)
             {
                 throw new InvalidOperationException(
-                    "The cloned native prompt has no DynamicInputIcon.");
+                    "SonsUiTools did not create its native Use " +
+                    "prompt link.");
             }
 
-            inputIcon.SetActionId(NativeUseAction);
+            GameObject ownedPrompt = promptTransform.gameObject;
+            ownedPrompt.name = InteractionPromptName;
+            ownedPrompt.SetActive(false);
+            LinkUiElement ownedLinkUi =
+                ownedPrompt.GetComponent<LinkUiElement>();
+            if (ownedLinkUi == null)
+            {
+                throw new InvalidOperationException(
+                    "SonsUiTools did not attach its required LinkUiElement.");
+            }
+
+            NeonLetterLinkUiTextureRuntime.ConfigureOwnedLinkUi(
+                ownedLinkUi);
+
             interaction._actionId = NativeUseAction;
             interaction._usePlayerNetworkInteraction = false;
             interaction._interactGui = ownedPrompt;
@@ -327,7 +336,6 @@ public static partial class NeonLetterColorRuntime
             _structureRoot = structureRoot;
             _interactionHolder = interactionHolder;
             _interactionProxy = interactionProxy;
-            InteractionInstanceId = interactionProxy.GetInstanceID();
             _interaction = interaction;
             _ownedPrompt = ownedPrompt;
             _managedCallback = OnActionPerformed;
@@ -337,7 +345,6 @@ public static partial class NeonLetterColorRuntime
         }
 
         internal int StructureInstanceId { get; }
-        internal int InteractionInstanceId { get; }
         internal int RecipeId { get; }
         internal bool CallbackRegistered => _callbackRegistered;
         internal bool IsDismantling { get; set; }

@@ -1,7 +1,5 @@
 using RedLoader;
 using Sons.Crafting.Structures;
-using Sons.Gameplay;
-using Sons.Gui.Input;
 using SonsSdk.Networking;
 using UnityEngine;
 
@@ -10,80 +8,8 @@ namespace SOTFNeonLetters;
 public static partial class NeonLetterColorRuntime
 {
     private const string NativeUseAction = "Use";
-    private static readonly NeonLetterColorInteractionFailureGate
-        InteractionFailureGate = new();
-    private static readonly HashSet<int> OwnedInteractionInstanceIds = new();
-    private static readonly NeonLetterColorInteractionPromptLifecycle<
-        GameObject> PromptLifecycle = new(IsPromptTemplateAlive);
-    private static readonly NeonLetterColorInteractionBackfillSchedule
-        BackfillSchedule = new();
-    private static bool _acceptPromptObservations;
-    private static bool _isObservingPrompt;
-
-    internal static void BeginInteractionPromptObservation()
-    {
-        _acceptPromptObservations = !IsDedicatedOrHeadless();
-    }
-
-    internal static void EndInteractionPromptObservation()
-    {
-        _acceptPromptObservations = false;
-        ResetInteractionDiscovery();
-    }
-
-    internal static void ObserveNativeInteractionPrompt(
-        GenericInteraction interaction)
-    {
-        if (!_acceptPromptObservations ||
-            _isObservingPrompt ||
-            interaction == null)
-        {
-            return;
-        }
-
-        _isObservingPrompt = true;
-        try
-        {
-            GameObject interactionObject = interaction.gameObject;
-            GameObject prompt = interaction._interactGui;
-            bool isOwned =
-                interactionObject != null &&
-                OwnedInteractionInstanceIds.Contains(
-                    interactionObject.GetInstanceID());
-            DynamicInputIcon inputIcon =
-                prompt == null
-                    ? null
-                    : prompt.GetComponentInChildren<DynamicInputIcon>(true);
-            // The cloned prompt is rebound to NativeUseAction, so the
-            // source interaction can use any native action.
-            NeonLetterColorInteractionPromptObservationResult result =
-                PromptLifecycle.Observe(
-                    new NeonLetterColorInteractionPromptCandidate<GameObject>(
-                        IsOwnedColorInteraction: isOwned,
-                        HasInteractionGui: prompt != null,
-                        HasDynamicInputIcon: inputIcon != null,
-                        prompt));
-            if (result !=
-                NeonLetterColorInteractionPromptObservationResult.Accepted)
-            {
-                return;
-            }
-
-            BackfillSchedule.Reset();
-            BackfillSchedule.TryBeginAttempt(_interactionUpdateTick);
-            InteractionFailureGate.ResetPromptFailureReport();
-        }
-        catch (Exception exception)
-        {
-            RLog.Error(
-                $"[SOTFNeonLetters] Native prompt observation failed: " +
-                exception);
-        }
-        finally
-        {
-            _isObservingPrompt = false;
-        }
-    }
+    private static readonly NeonLetterColorInteractionBackfillCoordinator
+        InteractionBackfill = new();
 
     internal static void RegisterColorInteraction(
         IScrewStructure registeredStructure,
@@ -122,13 +48,6 @@ public static partial class NeonLetterColorRuntime
             InteractionCreationFailures.Remove(structureInstanceId);
         }
 
-        if (!InteractionCreationFailures.AllowsAttempt(
-                structureInstanceId,
-                _interactionUpdateTick))
-        {
-            return;
-        }
-
         int recipeId = int.MinValue;
         try
         {
@@ -136,6 +55,25 @@ public static partial class NeonLetterColorRuntime
             if (!NeonLetterColorInteractionPolicy.IsEditable(
                     hasCompletedStructure: true,
                     recipeId))
+            {
+                return;
+            }
+
+            NeonLetterSmallDefinition definition =
+                ResolveRestoreDefinition(recipeId);
+            if (definition == null)
+            {
+                return;
+            }
+
+            TryApplyInitialMaterialColor(
+                structure,
+                structureRoot,
+                definition);
+
+            if (!InteractionCreationFailures.AllowsAttempt(
+                    structureInstanceId,
+                    _interactionUpdateTick))
             {
                 return;
             }
@@ -155,16 +93,6 @@ public static partial class NeonLetterColorRuntime
                     structureInstanceId,
                     out _);
                 DisposeInteractionLease(existingLease);
-            }
-
-            if (!TryGetPromptTemplate(out GameObject promptTemplate) ||
-                !NeonLetterColorInteractionPolicy.ShouldCreateLease(
-                    isDedicatedOrHeadless: false,
-                    hasCompletedStructure: true,
-                    recipeId,
-                    hasPromptTemplate: true))
-            {
-                return;
             }
 
             BoxCollider rootCollider =
@@ -210,8 +138,7 @@ public static partial class NeonLetterColorRuntime
                 structure,
                 structureRoot,
                 recipeId,
-                geometry,
-                promptTemplate);
+                geometry);
             if (!InteractionLeases.TryAdd(
                     structureInstanceId,
                     lease))
@@ -222,8 +149,6 @@ public static partial class NeonLetterColorRuntime
                 return;
             }
 
-            OwnedInteractionInstanceIds.Add(
-                lease.InteractionInstanceId);
             try
             {
                 lease.Activate();
@@ -268,6 +193,9 @@ public static partial class NeonLetterColorRuntime
 
             int structureInstanceId = structureRoot.GetInstanceID();
             InteractionCreationFailures.Remove(structureInstanceId);
+            MaterialInitialization.Remove(
+                structureInstanceId,
+                structureRoot);
             if (InteractionLeases.TryRemove(
                     structureInstanceId,
                     out ColorInteractionLease lease))
@@ -316,40 +244,6 @@ public static partial class NeonLetterColorRuntime
                 $"[SOTFNeonLetters] Failed to change native color " +
                 $"interaction dismantle state: {exception}");
         }
-    }
-
-    private static bool TryGetPromptTemplate(
-        out GameObject promptTemplate)
-    {
-        if (PromptLifecycle.TryGetTemplate(out promptTemplate))
-        {
-            return true;
-        }
-
-        promptTemplate = null;
-        LogMissingPromptOnce();
-        return false;
-    }
-
-    private static bool IsPromptTemplateAlive(GameObject promptTemplate)
-    {
-        return promptTemplate != null &&
-               promptTemplate.GetComponentInChildren<DynamicInputIcon>(
-                   true) != null;
-    }
-
-    private static void LogMissingPromptOnce()
-    {
-        if (!InteractionFailureGate.TryBeginPromptFailureReport())
-        {
-            return;
-        }
-
-        RLog.Error(
-            "[SOTFNeonLetters] Native color interaction is waiting for a " +
-            "compatible vanilla interaction prompt. The mod will keep " +
-            "observing native interaction lifecycle events; no raw-key " +
-            "fallback was installed.");
     }
 
 }

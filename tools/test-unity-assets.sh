@@ -17,11 +17,20 @@ bundle_path="$project_dir/Build/AssetBundles/Windows/sotfneonletters"
 unity_editor_path="${UNITY_EDITOR_PATH:-/Applications/Unity/Hub/Editor/2022.2.16f1/Unity.app/Contents/MacOS/Unity}"
 reproducibility_dir="$(mktemp -d "${TMPDIR:-/tmp}/sotf-neon-reproducibility.XXXXXX")"
 first_bundle="$reproducibility_dir/sotfneonletters.first"
+tracked_input_index="$reproducibility_dir/tracked-input.index"
+git_directory="$(git -C "$repo_root" rev-parse --absolute-git-dir)"
+cp "$git_directory/index" "$tracked_input_index"
+GIT_INDEX_FILE="$tracked_input_index" \
+  git -C "$repo_root" add --renormalize .
+tracked_input_tree="$(
+  GIT_INDEX_FILE="$tracked_input_index" \
+    git -C "$repo_root" write-tree
+)"
 
 assert_tracked_inputs_unchanged() {
-  if ! git -C "$repo_root" diff --quiet --; then
+  if ! git -C "$repo_root" diff --quiet "$tracked_input_tree" --; then
     printf 'Unity build modified tracked inputs:\n' >&2
-    git -C "$repo_root" diff --name-only -- >&2
+    git -C "$repo_root" diff --name-only "$tracked_input_tree" -- >&2
     fail "Unity asset builds must leave tracked inputs unchanged."
   fi
 }

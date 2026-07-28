@@ -13,7 +13,38 @@ public sealed class FullGateMutationIntegrationTests
             tracePath);
 
         Assert.Equal(
-            (ExitCode: 37, Trace: "dotnet\nmutation\n"),
+            (ExitCode: 37, Trace: "dotnet\ndotnet\nmutation\n"),
+            (
+                result.ExitCode,
+                Trace: File.ReadAllText(tracePath)));
+    }
+
+    [Fact]
+    public void AllocationFailureStopsTheFullGateBeforeMutation()
+    {
+        string fixtureRoot = CreateGateFixture();
+        string tracePath = Path.Combine(fixtureRoot, "gate.trace");
+        WriteExecutable(
+            Path.Combine(fixtureRoot, ".tools", "dotnet-6", "dotnet"),
+            "#!/usr/bin/env bash\n" +
+            "if [[ \"$*\" == *\"SOTFNeonLetters.AllocationTests\"* ]]; then\n" +
+            "  printf 'allocation\\n' >> \"$SOTF_NEON_GATE_TRACE\"\n" +
+            "  exit 39\n" +
+            "fi\n" +
+            "printf 'contracts\\n' >> \"$SOTF_NEON_GATE_TRACE\"\n" +
+            "exit 0\n");
+        WriteExecutable(
+            Path.Combine(fixtureRoot, "tools", "test-mutation.sh"),
+            "#!/usr/bin/env bash\n" +
+            "printf 'mutation\\n' >> \"$SOTF_NEON_GATE_TRACE\"\n" +
+            "exit 40\n");
+
+        ProcessResult result = RunGate(
+            Path.Combine(fixtureRoot, "tools", "test-all.sh"),
+            tracePath);
+
+        Assert.Equal(
+            (ExitCode: 39, Trace: "contracts\nallocation\n"),
             (
                 result.ExitCode,
                 Trace: File.ReadAllText(tracePath)));

@@ -34,6 +34,13 @@ contract_arguments=(
   test
   "$repo_root/tests/SOTFNeonLetters.ContractTests/SOTFNeonLetters.ContractTests.csproj"
 )
+allocation_arguments=(
+  run
+  --project
+  "$repo_root/tests/SOTFNeonLetters.AllocationTests/SOTFNeonLetters.AllocationTests.csproj"
+  --configuration
+  Release
+)
 build_arguments=(
   build "$repo_root/SOTFNeonLetters.csproj"
   --configuration Release
@@ -45,6 +52,7 @@ if [[ -n "${SOTF_NEON_GAME_DIR:-}" ]]; then
 fi
 
 "$dotnet" "${contract_arguments[@]}"
+"$dotnet" "${allocation_arguments[@]}"
 
 if [[ "${SOTF_NEON_COLD_RELEASE_ACTIVE:-}" != "1" ]]; then
   "$repo_root/tools/test-mutation.sh"

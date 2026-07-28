@@ -31,6 +31,11 @@ public static partial class NeonLetterColorRuntime
         NeonLetterEmissionBinding> EmissionBindings = new(
             IsStructureRootAlive,
             CreateEmissionBinding);
+    private static readonly NeonLetterMaterialInitializationLifecycle<
+        GameObject> MaterialInitialization = new(IsStructureRootAlive);
+    private static readonly NeonLetterMaterialColorApplyCallback<
+        InitialMaterialColorApplyState> ApplyInitialMaterialColorCallback =
+            ApplyInitialMaterialColor;
     private static bool _initialized;
     private static long _restoreUpdateTick;
 
@@ -41,9 +46,9 @@ public static partial class NeonLetterColorRuntime
             return;
         }
 
-        BeginInteractionPromptObservation();
         try
         {
+            NeonLetterLinkUiTextureRuntime.InitializeMainThread();
             SdkEvents.OnAfterSpawn.Subscribe(
                 SignalPersistentColorReadiness);
             Lifecycle.CompleteStage(
@@ -85,8 +90,8 @@ public static partial class NeonLetterColorRuntime
         SessionColors.Clear();
         PersistentColors.Clear();
         EmissionBindings.Clear();
+        MaterialInitialization.Clear();
         ReleaseAllInteractions();
-        EndInteractionPromptObservation();
         RestoreLifecycle.Deinitialize();
         ResetRestoreReadiness();
     }
@@ -148,6 +153,7 @@ public static partial class NeonLetterColorRuntime
             return;
         }
 
+        MaterialInitialization.Remove(structureInstanceId, structureRoot);
         EmissionBindings.Remove(structureInstanceId, structureRoot);
     }
 
@@ -215,6 +221,7 @@ public static partial class NeonLetterColorRuntime
             SessionColors.Clear();
             PersistentColors.Clear();
             EmissionBindings.Clear();
+            MaterialInitialization.Clear();
             RestoreLifecycle.OnWorldExited();
             ResetRestoreReadiness();
         }
@@ -372,6 +379,57 @@ public static partial class NeonLetterColorRuntime
     {
         return structureRoot != null;
     }
+
+    private static void TryApplyInitialMaterialColor(
+        ScrewStructure structure,
+        GameObject structureRoot,
+        NeonLetterSmallDefinition definition)
+    {
+        var state = new InitialMaterialColorApplyState(
+            structure,
+            structureRoot,
+            definition);
+        try
+        {
+            MaterialInitialization.TryApply(
+                structureRoot.GetInstanceID(),
+                structureRoot,
+                isKnownCompletedStructure: true,
+                ref state,
+                ApplyInitialMaterialColorCallback);
+        }
+        catch (Exception exception)
+        {
+            RLog.Error(
+                $"[SOTFNeonLetters] Failed to initialize one completed " +
+                $"neon material color: {exception}");
+        }
+    }
+
+    private static void ApplyInitialMaterialColor(
+        ref InitialMaterialColorApplyState state)
+    {
+        NeonLetterColorTargetMode targetMode = NetUtils.IsMultiplayer
+            ? NeonLetterColorTargetMode.Multiplayer
+            : NeonLetterColorTargetMode.SinglePlayer;
+        BoltEntity networkEntity = targetMode == NeonLetterColorTargetMode.Multiplayer
+            ? state.StructureRoot.GetComponent<BoltEntity>()
+            : null;
+        var target = new NeonLetterColorTarget(
+            state.Structure,
+            state.Definition,
+            targetMode,
+            networkEntity);
+        ApplyEmission(
+            state.StructureRoot,
+            state.Definition,
+            target.CurrentColor);
+    }
+
+    private readonly record struct InitialMaterialColorApplyState(
+        ScrewStructure Structure,
+        GameObject StructureRoot,
+        NeonLetterSmallDefinition Definition);
 
     private static NeonLetterEmissionBinding CreateEmissionBinding(
         GameObject structureRoot,

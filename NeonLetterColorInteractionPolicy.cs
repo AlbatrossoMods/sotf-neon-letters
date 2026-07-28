@@ -24,17 +24,6 @@ public static class NeonLetterColorInteractionPolicy
         return isPlayerControllable && hasFocusedLetter;
     }
 
-    internal static bool ShouldCreateLease(
-        bool isDedicatedOrHeadless,
-        bool hasCompletedStructure,
-        int recipeId,
-        bool hasPromptTemplate)
-    {
-        return !isDedicatedOrHeadless &&
-               hasPromptTemplate &&
-               IsEditable(hasCompletedStructure, recipeId);
-    }
-
     internal static bool CanOpenEditor(
         NeonLetterColorInteractionValidation validation)
     {
@@ -283,27 +272,6 @@ internal sealed class NeonLetterColorInteractionLeaseRegistry<TLease>
         LinkedListNode<int> SweepNode);
 }
 
-internal sealed class NeonLetterColorInteractionFailureGate
-{
-    private bool _promptFailureReported;
-
-    internal bool TryBeginPromptFailureReport()
-    {
-        if (_promptFailureReported)
-        {
-            return false;
-        }
-
-        _promptFailureReported = true;
-        return true;
-    }
-
-    internal void ResetPromptFailureReport()
-    {
-        _promptFailureReported = false;
-    }
-}
-
 internal sealed class
     NeonLetterColorInteractionCreationFailures<TFingerprint>
     where TFingerprint : notnull
@@ -411,116 +379,6 @@ internal sealed class
         TFingerprint Fingerprint);
 }
 
-internal readonly record struct
-    NeonLetterColorInteractionPromptCandidate<TTemplate>(
-        bool IsOwnedColorInteraction,
-        bool HasInteractionGui,
-        bool HasDynamicInputIcon,
-        TTemplate Template)
-    where TTemplate : class;
-
-internal enum NeonLetterColorInteractionPromptObservationResult
-{
-    Ignored,
-    Unchanged,
-    Accepted
-}
-
-internal sealed class
-    NeonLetterColorInteractionPromptLifecycle<TTemplate>
-    where TTemplate : class
-{
-    private readonly Func<TTemplate, bool> _isAlive;
-    private readonly NeonLetterColorInteractionBackfillCursor
-        _backfill = new();
-    private WeakReference<TTemplate>? _template;
-
-    internal NeonLetterColorInteractionPromptLifecycle(
-        Func<TTemplate, bool> isAlive)
-    {
-        ArgumentNullException.ThrowIfNull(isAlive);
-        _isAlive = isAlive;
-    }
-
-    internal ulong Generation { get; private set; }
-    internal bool IsBackfillPending => _backfill.IsActive;
-
-    internal int RetainedTemplateCount =>
-        TryGetTemplate(out _) ? 1 : 0;
-
-    internal NeonLetterColorInteractionPromptObservationResult Observe(
-        NeonLetterColorInteractionPromptCandidate<TTemplate> candidate)
-    {
-        if (candidate.IsOwnedColorInteraction ||
-            !candidate.HasInteractionGui ||
-            !candidate.HasDynamicInputIcon ||
-            candidate.Template == null)
-        {
-            return NeonLetterColorInteractionPromptObservationResult
-                .Ignored;
-        }
-
-        if (TryGetTemplate(out _))
-        {
-            return NeonLetterColorInteractionPromptObservationResult
-                .Unchanged;
-        }
-
-        _template =
-            new WeakReference<TTemplate>(candidate.Template);
-        if (Generation < ulong.MaxValue)
-        {
-            Generation++;
-        }
-
-        _backfill.StartCycle();
-        return NeonLetterColorInteractionPromptObservationResult.Accepted;
-    }
-
-    internal bool TryGetTemplate(out TTemplate? template)
-    {
-        if (_template != null &&
-            _template.TryGetTarget(out template) &&
-            template != null &&
-            _isAlive(template))
-        {
-            return true;
-        }
-
-        _template = null;
-        _backfill.Reset();
-        template = null;
-        return false;
-    }
-
-    internal void StartBackfillIfTemplateAvailable()
-    {
-        if (TryGetTemplate(out _))
-        {
-            _backfill.StartCycle();
-        }
-    }
-
-    internal NeonLetterColorInteractionBackfillWindow TakeBackfillWindow(
-        int itemCount,
-        int maximumItems)
-    {
-        return _backfill.TakeWindow(itemCount, maximumItems);
-    }
-
-    internal void ReportBackfillUnavailable()
-    {
-        _backfill.ReportUnavailable();
-    }
-
-    internal void Reset()
-    {
-        _template = null;
-        Generation = 0;
-        _backfill.Reset();
-    }
-}
-
 internal sealed class NeonLetterColorInteractionBackfillSchedule
 {
     internal const long RetryUpdateDelay = 120;
@@ -613,6 +471,46 @@ internal sealed class NeonLetterColorInteractionBackfillCursor
     {
         IsActive = false;
         _nextOffset = 0;
+    }
+}
+
+internal sealed class NeonLetterColorInteractionBackfillCoordinator
+{
+    private readonly NeonLetterColorInteractionBackfillSchedule _schedule =
+        new();
+    private readonly NeonLetterColorInteractionBackfillCursor _cursor =
+        new();
+
+    internal bool IsPending => _cursor.IsActive;
+
+    internal bool TryStartDueCycle(long updateTick)
+    {
+        if (_cursor.IsActive ||
+            !_schedule.TryBeginAttempt(updateTick))
+        {
+            return false;
+        }
+
+        _cursor.StartCycle();
+        return true;
+    }
+
+    internal NeonLetterColorInteractionBackfillWindow TakeWindow(
+        int itemCount,
+        int maximumItems)
+    {
+        return _cursor.TakeWindow(itemCount, maximumItems);
+    }
+
+    internal void ReportUnavailable()
+    {
+        _cursor.ReportUnavailable();
+    }
+
+    internal void Reset()
+    {
+        _cursor.Reset();
+        _schedule.Reset();
     }
 }
 

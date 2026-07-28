@@ -1,10 +1,55 @@
 using SOTFNeonLetters;
 using Xunit;
 
+[Collection(AllocationSensitiveTestCollection.Name)]
 public sealed class NativeColorInteractionTests
 {
     private static readonly Func<TrackedRoot, bool>
         IsRootAliveCallback = IsRootAlive;
+
+    [Theory]
+    [InlineData(float.NaN, 0f, 0f, 1f, 1f, 1f)]
+    [InlineData(0f, float.NaN, 0f, 1f, 1f, 1f)]
+    [InlineData(0f, 0f, float.NaN, 1f, 1f, 1f)]
+    [InlineData(0f, 0f, 0f, float.NaN, 1f, 1f)]
+    [InlineData(0f, 0f, 0f, 1f, float.NaN, 1f)]
+    [InlineData(0f, 0f, 0f, 1f, 1f, float.NaN)]
+    public void NonFiniteGeometryComponentIsRejected(
+        float centerX,
+        float centerY,
+        float centerZ,
+        float sizeX,
+        float sizeY,
+        float sizeZ)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => NeonLetterColorInteractionGeometryPolicy.Resolve(
+                new NeonLetterColorInteractionBounds(
+                    centerX,
+                    centerY,
+                    centerZ,
+                    sizeX,
+                    sizeY,
+                    sizeZ)));
+    }
+
+    [Fact]
+    public void ZeroSizedGlyphProxyRadiusUsesTheNamedMinimum()
+    {
+        NeonLetterColorInteractionGeometry geometry =
+            NeonLetterColorInteractionGeometryPolicy.Resolve(
+                new NeonLetterColorInteractionBounds(
+                    CenterX: 0f,
+                    CenterY: 0f,
+                    CenterZ: 0f,
+                    SizeX: 0f,
+                    SizeY: 0f,
+                    SizeZ: 0f));
+
+        Assert.Equal(
+            NeonLetterColorInteractionGeometryPolicy.MinimumProxyRadius,
+            geometry.Radius);
+    }
 
     [Fact]
     public void ProxyGeometryKeepsTheGlyphColliderCenter()
@@ -59,68 +104,33 @@ public sealed class NativeColorInteractionTests
     }
 
     [Fact]
-    public void CompletedKnownGlyphCanOwnANativeInteraction()
+    public void CompletedKnownGlyphIsEditable()
     {
-        bool shouldCreate =
-            NeonLetterColorInteractionPolicy.ShouldCreateLease(
-                isDedicatedOrHeadless: false,
-                hasCompletedStructure: true,
-                NeonLetterSmallCatalog.Get('A').RecipeId,
-                hasPromptTemplate: true);
+        bool isEditable = NeonLetterColorInteractionPolicy.IsEditable(
+            hasCompletedStructure: true,
+            NeonLetterSmallCatalog.Get('A').RecipeId);
 
-        Assert.True(shouldCreate);
+        Assert.True(isEditable);
     }
 
     [Fact]
-    public void CraftingPreviewCannotOwnANativeInteraction()
+    public void CraftingPreviewIsNotEditable()
     {
-        bool shouldCreate =
-            NeonLetterColorInteractionPolicy.ShouldCreateLease(
-                isDedicatedOrHeadless: false,
-                hasCompletedStructure: false,
-                NeonLetterSmallCatalog.Get('A').RecipeId,
-                hasPromptTemplate: true);
+        bool isEditable = NeonLetterColorInteractionPolicy.IsEditable(
+            hasCompletedStructure: false,
+            NeonLetterSmallCatalog.Get('A').RecipeId);
 
-        Assert.False(shouldCreate);
+        Assert.False(isEditable);
     }
 
     [Fact]
-    public void UnknownRecipeCannotOwnANativeInteraction()
+    public void UnknownRecipeIsNotEditable()
     {
-        bool shouldCreate =
-            NeonLetterColorInteractionPolicy.ShouldCreateLease(
-                isDedicatedOrHeadless: false,
-                hasCompletedStructure: true,
-                recipeId: int.MinValue,
-                hasPromptTemplate: true);
+        bool isEditable = NeonLetterColorInteractionPolicy.IsEditable(
+            hasCompletedStructure: true,
+            recipeId: int.MinValue);
 
-        Assert.False(shouldCreate);
-    }
-
-    [Fact]
-    public void DedicatedServerCannotOwnANativeInteraction()
-    {
-        bool shouldCreate =
-            NeonLetterColorInteractionPolicy.ShouldCreateLease(
-                isDedicatedOrHeadless: true,
-                hasCompletedStructure: true,
-                NeonLetterSmallCatalog.Get('A').RecipeId,
-                hasPromptTemplate: true);
-
-        Assert.False(shouldCreate);
-    }
-
-    [Fact]
-    public void MissingVanillaPromptFailsClosed()
-    {
-        bool shouldCreate =
-            NeonLetterColorInteractionPolicy.ShouldCreateLease(
-                isDedicatedOrHeadless: false,
-                hasCompletedStructure: true,
-                NeonLetterSmallCatalog.Get('A').RecipeId,
-                hasPromptTemplate: false);
-
-        Assert.False(shouldCreate);
+        Assert.False(isEditable);
     }
 
     [Theory]
@@ -330,11 +340,11 @@ public sealed class NativeColorInteractionTests
     }
 
     [Fact]
-    public void LiveLeaseMaintenanceInspectsOnlyItsBoundWithoutAllocating()
+    public void LiveLeaseMaintenanceInspectsOnlyItsConfiguredBound()
     {
         const int LeaseCount = 10_000;
         const int EntriesPerUpdate = 16;
-        const int UpdatesPerSample = 10_000;
+        const int UpdateCount = 10_000;
         var registry =
             new NeonLetterColorInteractionLeaseRegistry<TrackedRoot>();
         for (int index = 0; index < LeaseCount; index++)
@@ -342,38 +352,27 @@ public sealed class NativeColorInteractionTests
             registry.TryAdd(index, new TrackedRoot(isAlive: true));
         }
 
-        MeasureLiveLeaseMaintenanceAllocation(
-            registry,
-            EntriesPerUpdate,
-            iterations: 2_048,
-            out _,
-            out _);
-        long maximumAllocatedBytes = 0;
-        int inspected = 0;
+        int inspectedEntries = 0;
         bool removed = false;
-        for (int sample = 0; sample < 5; sample++)
+        for (int update = 0; update < UpdateCount; update++)
         {
-            maximumAllocatedBytes = Math.Max(
-                maximumAllocatedBytes,
-                MeasureLiveLeaseMaintenanceAllocation(
-                    registry,
-                    EntriesPerUpdate,
-                    UpdatesPerSample,
-                    out inspected,
-                    out removed));
+            removed |= registry.TryTakeNextDead(
+                EntriesPerUpdate,
+                IsRootAliveCallback,
+                out _,
+                out int inspectedThisUpdate);
+            inspectedEntries += inspectedThisUpdate;
         }
 
         Assert.Equal(
             (
-                EntriesPerUpdate * UpdatesPerSample,
+                EntriesPerUpdate * UpdateCount,
                 false,
-                LeaseCount,
-                true),
+                LeaseCount),
             (
-                inspected,
+                inspectedEntries,
                 removed,
-                registry.Count,
-                maximumAllocatedBytes <= 256));
+                registry.Count));
     }
 
     [Fact]
@@ -609,270 +608,301 @@ public sealed class NativeColorInteractionTests
     }
 
     [Fact]
-    public void MissingPromptFailureIsReportedOnlyOnce()
+    public void NativeUsePromptLinkSourceUsesScreenUseWhileInactive()
     {
-        var gate = new NeonLetterColorInteractionFailureGate();
-
-        bool first = gate.TryBeginPromptFailureReport();
-        bool second = gate.TryBeginPromptFailureReport();
-
-        Assert.Equal((true, false), (first, second));
-    }
-
-    [Fact]
-    public void SuccessfulPromptDiscoveryStartsANewFailureReportingEpisode()
-    {
-        var gate = new NeonLetterColorInteractionFailureGate();
-        gate.TryBeginPromptFailureReport();
-
-        gate.ResetPromptFailureReport();
-
-        Assert.True(gate.TryBeginPromptFailureReport());
-    }
-
-    [Fact]
-    public void MissingPromptDiagnosticRequestsAStructurallyCompatibleVanillaPrompt()
-    {
+        string leaseSource = File.ReadAllText(
+            FindRepositoryFile("NeonLetterColorInteractionLeaseRuntime.cs"));
         string runtimeSource = File.ReadAllText(
             FindRepositoryFile("NeonLetterColorInteractionRuntime.cs"));
+        int holderDisabled = leaseSource.IndexOf(
+            "interactionHolder.SetActive(false)",
+            StringComparison.Ordinal);
+        int interactionCreated = leaseSource.IndexOf(
+            "SonsInteractionTools.CreateInteraction<GenericInteraction>",
+            StringComparison.Ordinal);
+        int promptCreated = leaseSource.IndexOf(
+            "SonsUiTools.CreateLinkUi(",
+            StringComparison.Ordinal);
+        int actionConfigured = leaseSource.IndexOf(
+            "interaction._actionId = NativeUseAction",
+            StringComparison.Ordinal);
+        int promptConfigured = leaseSource.IndexOf(
+            "interaction._interactGui = ownedPrompt",
+            StringComparison.Ordinal);
+        int callbackRegistered = leaseSource.IndexOf(
+            "lease.RegisterCallback()",
+            StringComparison.Ordinal);
+        int leaseCreated = runtimeSource.IndexOf(
+            "ColorInteractionLease lease = CreateColorInteractionLease(",
+            StringComparison.Ordinal);
+        int holderActivated = runtimeSource.IndexOf(
+            "lease.Activate();",
+            StringComparison.Ordinal);
 
-        Assert.Equal(
-            (true, false),
-            (
-                runtimeSource.Contains(
-                    "compatible vanilla interaction prompt",
-                    StringComparison.Ordinal),
-                runtimeSource.Contains(
-                    "compatible vanilla Use prompt",
-                    StringComparison.Ordinal)));
+        Assert.True(
+            leaseSource.Contains(
+                "SonsUiTools.CreateLinkUi(",
+                StringComparison.Ordinal) &&
+            leaseSource.Contains(
+                "proxyTransform,\n" +
+                "                    " +
+                "\"screen.use\")",
+                StringComparison.Ordinal) &&
+            holderDisabled >= 0 &&
+            holderDisabled < interactionCreated &&
+            interactionCreated < promptCreated &&
+            promptCreated < actionConfigured &&
+            actionConfigured < promptConfigured &&
+            promptConfigured < callbackRegistered &&
+            leaseCreated >= 0 &&
+            leaseCreated < holderActivated);
     }
 
     [Fact]
-    public void StructurallyCompatibleVanillaPromptIsRetainedAsInteractionTemplate()
-    {
-        var prompt = new TrackedPrompt();
-        var lifecycle =
-            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
-                candidate => candidate.IsAlive);
-
-        NeonLetterColorInteractionPromptObservationResult result =
-            lifecycle.Observe(
-                new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                    IsOwnedColorInteraction: false,
-                    HasInteractionGui: true,
-                    HasDynamicInputIcon: true,
-                    prompt));
-
-        Assert.Equal(
-            (
-                NeonLetterColorInteractionPromptObservationResult.Accepted,
-                true,
-                prompt),
-            (
-                result,
-                lifecycle.TryGetTemplate(out TrackedPrompt? resolved),
-                resolved));
-    }
-
-    [Fact]
-    public void NativeInteractionLeaseRebindsTheClonedPromptAndProxyToUse()
+    public void NativePromptLinkSourceFailsClosedWhenCreationFails()
     {
         string leaseSource = File.ReadAllText(
             FindRepositoryFile("NeonLetterColorInteractionLeaseRuntime.cs"));
 
-        Assert.Equal(
-            (true, true),
-            (
-                leaseSource.Contains(
-                    "inputIcon.SetActionId(NativeUseAction)",
-                    StringComparison.Ordinal),
-                leaseSource.Contains(
-                    "interaction._actionId = NativeUseAction",
-                    StringComparison.Ordinal)));
+        Assert.True(
+            leaseSource.Contains(
+                "if (promptTransform == null ||\n" +
+                "                promptTransform.gameObject == null)",
+                StringComparison.Ordinal) &&
+            leaseSource.Contains(
+                "\"SonsUiTools did not create its native Use \" +",
+                StringComparison.Ordinal) &&
+            leaseSource.Contains(
+                "\"prompt link.\"",
+                StringComparison.Ordinal));
     }
 
     [Fact]
-    public void OwnedColorInteractionCannotBecomePromptTemplate()
+    public void NativeUsePromptLeaseSourceHasNoTemplateOrStaticIconDependency()
     {
-        var lifecycle =
-            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
-                candidate => candidate.IsAlive);
+        string leaseSource = File.ReadAllText(
+            FindRepositoryFile("NeonLetterColorInteractionLeaseRuntime.cs"));
+        string runtimeSource = File.ReadAllText(
+            FindRepositoryFile("NeonLetterColorInteractionRuntime.cs"));
+        int registerStart = runtimeSource.IndexOf(
+            "internal static void RegisterColorInteraction(",
+            StringComparison.Ordinal);
+        int unregisterStart = runtimeSource.IndexOf(
+            "internal static void UnregisterColorInteraction(",
+            StringComparison.Ordinal);
+        string registrationSource =
+            registerStart >= 0 && unregisterStart > registerStart
+                ? runtimeSource.Substring(
+                    registerStart,
+                    unregisterStart - registerStart)
+                : string.Empty;
 
-        NeonLetterColorInteractionPromptObservationResult result =
-            lifecycle.Observe(
-                new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                    IsOwnedColorInteraction: true,
-                    HasInteractionGui: true,
-                    HasDynamicInputIcon: true,
-                    new TrackedPrompt()));
-
-        Assert.Equal(
-            NeonLetterColorInteractionPromptObservationResult.Ignored,
-            result);
-    }
-
-    [Theory]
-    [InlineData(false, true)]
-    [InlineData(true, false)]
-    public void InvalidNativePromptCandidateIsIgnored(
-        bool hasInteractionGui,
-        bool hasDynamicInputIcon)
-    {
-        var lifecycle =
-            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
-                candidate => candidate.IsAlive);
-
-        NeonLetterColorInteractionPromptObservationResult result =
-            lifecycle.Observe(
-                new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                    IsOwnedColorInteraction: false,
-                    hasInteractionGui,
-                    hasDynamicInputIcon,
-                    new TrackedPrompt()));
-
-        Assert.Equal(
-            NeonLetterColorInteractionPromptObservationResult.Ignored,
-            result);
+        Assert.True(
+            !leaseSource.Contains(
+                "DynamicInputIcon",
+                StringComparison.Ordinal) &&
+            !leaseSource.Contains(
+                "InputIconManager",
+                StringComparison.Ordinal) &&
+            !leaseSource.Contains(
+                "Instantiate<GameObject>",
+                StringComparison.Ordinal) &&
+            !leaseSource.Contains(
+                "Resources.FindObjectsOfTypeAll",
+                StringComparison.Ordinal) &&
+            !registrationSource.Contains(
+                "TryGetPromptTemplate",
+                StringComparison.Ordinal) &&
+            !registrationSource.Contains(
+                "promptTemplate",
+                StringComparison.Ordinal));
     }
 
     [Fact]
-    public void DestroyedPromptCanBeReplacedByTheNextObservedCandidate()
+    public void NativeColorInteractionUsesOwnedLinkUiAndManagerBackfill()
     {
-        var first = new TrackedPrompt();
-        var replacement = new TrackedPrompt();
-        var lifecycle =
-            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
-                candidate => candidate.IsAlive);
-        lifecycle.Observe(
-            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                false,
-                true,
-                true,
-                first));
-        first.IsAlive = false;
+        string source = string.Join(
+            "\n",
+            new[]
+            {
+                "NeonLetterColorInteractionLeaseRuntime.cs",
+                "NeonLetterColorInteractionLifecycleRuntime.cs",
+                "NeonLetterColorInteractionRuntime.cs",
+                "NeonLetterColorInteractionPolicy.cs",
+                "NeonLetterColorInteractionHarmony.cs",
+                "NeonLetterColorRuntime.cs",
+                "SOTFNeonLetters.cs"
+            }.Select(path => File.ReadAllText(FindRepositoryFile(path))));
+        string[] removedArchitecture =
+        {
+            "nameof(GenericInteraction.OnEnable)",
+            "ObserveNativeInteractionPrompt",
+            "BeginInteractionPromptObservation",
+            "EndInteractionPromptObservation",
+            "PromptLifecycle",
+            "PromptDiagnostics",
+            "WeakReference<",
+            "DynamicInputIcon",
+            "OwnedInteractionInstanceIds",
+            "TryGetPromptTemplate",
+            "hasPromptTemplate",
+            "compatible vanilla interaction prompt",
+            "NeonLetterLinkUiPromptRuntime"
+        };
 
-        NeonLetterColorInteractionPromptObservationResult result =
-            lifecycle.Observe(
-                new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                    false,
-                    true,
-                    true,
-                    replacement));
-        bool found = lifecycle.TryGetTemplate(
-            out TrackedPrompt? resolved);
-
-        Assert.Equal(
-            (
-                NeonLetterColorInteractionPromptObservationResult.Accepted,
-                true,
-                replacement,
-                2UL),
-            (result, found, resolved, lifecycle.Generation));
+        Assert.True(
+            removedArchitecture.All(
+                token => !source.Contains(token, StringComparison.Ordinal)) &&
+            source.Contains(
+                "SonsUiTools.CreateLinkUi(",
+                StringComparison.Ordinal) &&
+            source.Contains(
+                "\"screen.use\"",
+                StringComparison.Ordinal) &&
+            source.Contains(
+                "InteractionBackfill.TryStartDueCycle(",
+                StringComparison.Ordinal) &&
+            source.Contains(
+                "interaction.RegisterActionPerformed(",
+                StringComparison.Ordinal));
     }
 
     [Fact]
-    public void RepeatedOnEnableForCurrentPromptIsIdempotent()
+    public void DueBackfillAttemptsExistingStructuresWithoutAPrompt()
     {
-        var prompt = new TrackedPrompt();
-        var lifecycle =
-            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
-                candidate => candidate.IsAlive);
-        var candidate =
-            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                false,
-                true,
-                true,
-                prompt);
-        lifecycle.Observe(candidate);
+        var backfill =
+            new NeonLetterColorInteractionBackfillCoordinator();
+        int attempts = 0;
 
-        NeonLetterColorInteractionPromptObservationResult result =
-            lifecycle.Observe(candidate);
+        bool started = backfill.TryStartDueCycle(updateTick: 0);
+        NeonLetterColorInteractionBackfillWindow window =
+            backfill.TakeWindow(itemCount: 3, maximumItems: 64);
+        for (int index = window.StartOffset;
+             index < window.StartOffset + window.Count;
+             index++)
+        {
+            attempts++;
+        }
 
-        Assert.Equal(
-            (
-                NeonLetterColorInteractionPromptObservationResult.Unchanged,
-                1UL,
-                1),
-            (result, lifecycle.Generation, lifecycle.RetainedTemplateCount));
+        Assert.Equal((true, 3, false), (started, attempts, backfill.IsPending));
     }
 
     [Fact]
-    public void PromptObservationRetainsOnlyTheCurrentTemplate()
+    public void TransientLeaseFailureRetriesAtTheFirstDueBackfillTick()
     {
-        var lifecycle =
-            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
-                candidate => candidate.IsAlive);
-        lifecycle.Observe(
-            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                false,
-                true,
-                true,
-                new TrackedPrompt()));
+        var backfill =
+            new NeonLetterColorInteractionBackfillCoordinator();
+        var failures =
+            new NeonLetterColorInteractionCreationFailures<string>();
+        var attemptTicks = new List<long>();
+        for (long updateTick = 0;
+             updateTick <=
+             NeonLetterColorInteractionBackfillSchedule.RetryUpdateDelay;
+             updateTick++)
+        {
+            if (!backfill.TryStartDueCycle(updateTick))
+            {
+                continue;
+            }
 
-        lifecycle.Observe(
-            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                false,
-                true,
-                true,
-                new TrackedPrompt()));
+            NeonLetterColorInteractionBackfillWindow window =
+                backfill.TakeWindow(itemCount: 1, maximumItems: 64);
+            if (window.Count == 0 ||
+                !failures.AllowsAttempt(
+                    structureInstanceId: 7,
+                    updateTick))
+            {
+                continue;
+            }
 
-        Assert.Equal(1, lifecycle.RetainedTemplateCount);
+            attemptTicks.Add(updateTick);
+            failures.RecordTransientFailure(
+                structureInstanceId: 7,
+                updateTick,
+                "native prompt link unavailable");
+        }
+
+        Assert.Equal(new long[] { 0, 120 }, attemptTicks);
     }
 
     [Fact]
-    public void PromptBackfillCycleAdvancesInBoundedWindows()
+    public void RepeatedBackfillCyclesKeepOneLeasePerLiveStructure()
     {
-        var lifecycle =
-            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
-                candidate => candidate.IsAlive);
-        lifecycle.Observe(
-            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                false,
-                true,
-                true,
-                new TrackedPrompt()));
+        var backfill =
+            new NeonLetterColorInteractionBackfillCoordinator();
+        var leases =
+            new NeonLetterColorInteractionLeaseRegistry<object>();
+        int leasesCreated = 0;
+        foreach (long updateTick in new long[] { 0, 120, 240 })
+        {
+            if (!backfill.TryStartDueCycle(updateTick))
+            {
+                continue;
+            }
 
-        NeonLetterColorInteractionBackfillWindow first =
-            lifecycle.TakeBackfillWindow(
-                itemCount: 130,
-                maximumItems: 64);
-        NeonLetterColorInteractionBackfillWindow second =
-            lifecycle.TakeBackfillWindow(
-                itemCount: 130,
-                maximumItems: 64);
-        NeonLetterColorInteractionBackfillWindow third =
-            lifecycle.TakeBackfillWindow(
-                itemCount: 130,
-                maximumItems: 64);
+            NeonLetterColorInteractionBackfillWindow window =
+                backfill.TakeWindow(itemCount: 3, maximumItems: 64);
+            for (int structureInstanceId = window.StartOffset + 1;
+                 structureInstanceId <=
+                 window.StartOffset + window.Count;
+                 structureInstanceId++)
+            {
+                if (leases.Contains(structureInstanceId))
+                {
+                    continue;
+                }
 
-        Assert.Equal(
-            (0, 64, 64, 64, 128, 2, false),
-            (
-                first.StartOffset,
-                first.Count,
-                second.StartOffset,
-                second.Count,
-                third.StartOffset,
-                third.Count,
-                lifecycle.IsBackfillPending));
+                if (leases.TryAdd(structureInstanceId, new object()))
+                {
+                    leasesCreated++;
+                }
+            }
+        }
+
+        Assert.Equal((3, 3), (leasesCreated, leases.Count));
     }
 
     [Fact]
-    public void UnavailableManagerKeepsPromptBackfillCycleRetryable()
+    public void RuntimeBackfillDecisionUsesOnlyTheManagerCoordinator()
     {
-        var lifecycle =
-            new NeonLetterColorInteractionPromptLifecycle<TrackedPrompt>(
-                candidate => candidate.IsAlive);
-        lifecycle.Observe(
-            new NeonLetterColorInteractionPromptCandidate<TrackedPrompt>(
-                false,
-                true,
-                true,
-                new TrackedPrompt()));
+        string lifecycleSource = File.ReadAllText(
+            FindRepositoryFile(
+                "NeonLetterColorInteractionLifecycleRuntime.cs"));
+        int advanceStart = lifecycleSource.IndexOf(
+            "private static void AdvanceColorInteractions()",
+            StringComparison.Ordinal);
+        int livenessStart = lifecycleSource.IndexOf(
+            "private static bool IsInteractionLeaseAlive(",
+            StringComparison.Ordinal);
+        string advanceMethod =
+            advanceStart >= 0 && livenessStart > advanceStart
+                ? lifecycleSource.Substring(
+                    advanceStart,
+                    livenessStart - advanceStart)
+                : string.Empty;
+        int backfillStart = lifecycleSource.IndexOf(
+            "private static void AdvanceInteractionBackfill()",
+            StringComparison.Ordinal);
+        int headlessStart = lifecycleSource.IndexOf(
+            "private static bool IsDedicatedOrHeadless()",
+            StringComparison.Ordinal);
+        string backfillMethod =
+            backfillStart >= 0 && headlessStart > backfillStart
+                ? lifecycleSource.Substring(
+                    backfillStart,
+                    headlessStart - backfillStart)
+                : string.Empty;
 
-        lifecycle.ReportBackfillUnavailable();
-
-        Assert.True(lifecycle.IsBackfillPending);
+        Assert.True(
+            !advanceMethod.Contains(
+                "PromptLifecycle",
+                StringComparison.Ordinal) &&
+            !backfillMethod.Contains(
+                "PromptLifecycle",
+                StringComparison.Ordinal) &&
+            advanceMethod.Contains(
+                "InteractionBackfill.TryStartDueCycle(",
+                StringComparison.Ordinal));
     }
 
     private static bool IsRootAlive(TrackedRoot root)
@@ -916,29 +946,6 @@ public sealed class NativeColorInteractionTests
         return GC.GetAllocatedBytesForCurrentThread() - before;
     }
 
-    private static long MeasureLiveLeaseMaintenanceAllocation(
-        NeonLetterColorInteractionLeaseRegistry<TrackedRoot> registry,
-        int maxEntries,
-        int iterations,
-        out int inspected,
-        out bool removed)
-    {
-        inspected = 0;
-        removed = false;
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int iteration = 0; iteration < iterations; iteration++)
-        {
-            removed |= registry.TryTakeNextDead(
-                maxEntries,
-                IsRootAliveCallback,
-                out _,
-                out int inspectedThisUpdate);
-            inspected += inspectedThisUpdate;
-        }
-
-        return GC.GetAllocatedBytesForCurrentThread() - before;
-    }
-
     private sealed class TrackedRoot
     {
         internal TrackedRoot(bool isAlive)
@@ -949,8 +956,4 @@ public sealed class NativeColorInteractionTests
         internal bool IsAlive { get; }
     }
 
-    private sealed class TrackedPrompt
-    {
-        internal bool IsAlive { get; set; } = true;
-    }
 }

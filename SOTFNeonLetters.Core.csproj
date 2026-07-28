@@ -13,7 +13,9 @@
         <Compile Include="NeonLetterEmissionPolicy.cs" />
         <Compile Include="NeonLetterEmissionBinding.cs" />
         <Compile Include="NeonLetterEmissionBindingCache.cs" />
+        <Compile Include="NeonLetterMaterialInitializationLifecycle.cs" />
         <Compile Include="NeonLetterColorInteractionPolicy.cs" />
+        <Compile Include="NeonLetterLinkUiTextureCache.cs" />
         <Compile Include="NeonLetterMultiplayerPolicy.cs" />
         <Compile Include="NeonLetterMultiplayerApplyPolicy.cs" />
         <Compile Include="NeonLetterMultiplayerHandshakePolicy.cs" />
@@ -41,6 +43,9 @@
     <ItemGroup>
         <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
             <_Parameter1>SOTFNeonLetters.ContractTests</_Parameter1>
+        </AssemblyAttribute>
+        <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+            <_Parameter1>SOTFNeonLetters.AllocationTests</_Parameter1>
         </AssemblyAttribute>
     </ItemGroup>
 

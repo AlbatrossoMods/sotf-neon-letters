@@ -3991,18 +3991,25 @@ void CheckColorRuntimeSafetyContract()
         "the native interaction uses the remappable local Use action");
     CheckEqual(
         true,
-        source.Contains("DynamicInputIcon", StringComparison.Ordinal) &&
-        source.Contains("SetActionId(NativeUseAction)", StringComparison.Ordinal),
-        "the cloned vanilla prompt follows the active keyboard or controller binding");
+        source.Contains(
+            "SonsUiTools.CreateLinkUi(",
+            StringComparison.Ordinal) &&
+        source.Contains(
+            "\"screen.use\"",
+            StringComparison.Ordinal),
+        "each native interaction requests the native screen.use prompt through LinkUi");
     CheckEqual(
         false,
-        source.Contains(
-            "Object.Destroy(promptTemplate)",
+        interactionLeaseRuntimeSource.Contains(
+            "DynamicInputIcon",
             StringComparison.Ordinal) ||
-        source.Contains(
-            "Object.Destroy(_promptTemplate)",
+        interactionLeaseRuntimeSource.Contains(
+            "SetTexture(",
+            StringComparison.Ordinal) ||
+        interactionLeaseRuntimeSource.Contains(
+            "SetMaterial(",
             StringComparison.Ordinal),
-        "interaction cleanup never destroys the borrowed vanilla prompt template");
+        "per-letter interaction leases do not clone or override prompt visual resources");
     CheckEqual(
         false,
         source.Contains(
@@ -4010,60 +4017,20 @@ void CheckColorRuntimeSafetyContract()
             StringComparison.Ordinal),
         "native prompt discovery never materializes every GenericInteraction");
     CheckEqual(
-        true,
+        false,
         source.Contains(
             "nameof(GenericInteraction.OnEnable)",
-            StringComparison.Ordinal) &&
-        source.Contains(
-            "OwnedInteractionInstanceIds",
-            StringComparison.Ordinal) &&
+            StringComparison.Ordinal) ||
         source.Contains(
             "NeonLetterColorInteractionPromptLifecycle",
-            StringComparison.Ordinal),
-        "native prompt discovery observes one GenericInteraction lifecycle event at a time");
-    int promptObservationStarted = modRuntimeSource.IndexOf(
-        "BeginInteractionPromptObservation();",
-        StringComparison.Ordinal);
-    int sdkInitializationStarted = modRuntimeSource.IndexOf(
-        "protected override void OnSdkInitialized()",
-        StringComparison.Ordinal);
-    CheckEqual(
-        true,
-        promptObservationStarted >= 0 &&
-        promptObservationStarted < sdkInitializationStarted &&
+            StringComparison.Ordinal) ||
+        source.Contains(
+            "OwnedInteractionInstanceIds",
+            StringComparison.Ordinal) ||
         modRuntimeSource.Contains(
-            "CompleteStage(" +
-            "NeonLetterColorRuntime.EndInteractionPromptObservation)",
+            "BeginInteractionPromptObservation",
             StringComparison.Ordinal),
-        "prompt observation starts before SDK world interactions and has loader-owned lifecycle cleanup");
-    int endObservation = source.IndexOf(
-        "internal static void EndInteractionPromptObservation()",
-        StringComparison.Ordinal);
-    int observePrompt = source.IndexOf(
-        "internal static void ObserveNativeInteractionPrompt(",
-        StringComparison.Ordinal);
-    int resetDiscovery = interactionLifecycleRuntimeSource.IndexOf(
-        "private static void ResetInteractionDiscovery()",
-        StringComparison.Ordinal);
-    string endObservationSource =
-        endObservation >= 0 && observePrompt > endObservation
-            ? source.Substring(
-                endObservation,
-                observePrompt - endObservation)
-            : string.Empty;
-    string resetDiscoverySource =
-        resetDiscovery >= 0
-            ? interactionLifecycleRuntimeSource.Substring(resetDiscovery)
-            : string.Empty;
-    CheckEqual(
-        true,
-        endObservationSource.Contains(
-            "_acceptPromptObservations = false",
-            StringComparison.Ordinal) &&
-        !resetDiscoverySource.Contains(
-            "_acceptPromptObservations = false",
-            StringComparison.Ordinal),
-        "world reset preserves prompt observation while mod cleanup closes the postfix gate");
+        "native LinkUi and manager backfill require no GenericInteraction prompt observation");
     CheckEqual(
         true,
         !source.Contains(
@@ -4103,14 +4070,6 @@ void CheckColorRuntimeSafetyContract()
             "InteractionCreationFailures.Clear()",
             StringComparison.Ordinal),
         "per-structure interaction creation failures have terminal, retry, and recovery state");
-    int ownedInteractionRegistered = source.IndexOf(
-        "OwnedInteractionInstanceIds.Add(",
-        StringComparison.Ordinal);
-    CheckEqual(
-        true,
-        ownedInteractionRegistered >= 0 &&
-        ownedInteractionRegistered < holderActivated,
-        "owned color interactions are registered before their inactive holder is activated");
     CheckEqual(
         true,
         source.Contains(

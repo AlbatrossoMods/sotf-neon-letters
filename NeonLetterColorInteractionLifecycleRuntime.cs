@@ -45,17 +45,8 @@ public static partial class NeonLetterColorRuntime
             DisposeInteractionLease(expiredLease);
         }
 
-        if (!PromptLifecycle.TryGetTemplate(out _))
-        {
-            return;
-        }
-
-        if (!PromptLifecycle.IsBackfillPending &&
-            BackfillSchedule.TryBeginAttempt(
-                _interactionUpdateTick))
-        {
-            PromptLifecycle.StartBackfillIfTemplateAvailable();
-        }
+        InteractionBackfill.TryStartDueCycle(
+            _interactionUpdateTick);
 
         AdvanceInteractionBackfill();
     }
@@ -97,7 +88,7 @@ public static partial class NeonLetterColorRuntime
 
     private static void AdvanceInteractionBackfill()
     {
-        if (!PromptLifecycle.IsBackfillPending)
+        if (!InteractionBackfill.IsPending)
         {
             return;
         }
@@ -106,14 +97,14 @@ public static partial class NeonLetterColorRuntime
                 out ScrewStructureManager manager) ||
             manager._structures == null)
         {
-            PromptLifecycle.ReportBackfillUnavailable();
+            InteractionBackfill.ReportUnavailable();
             return;
         }
 
         Il2CppSystem.Collections.Generic.List<IScrewStructure> structures =
             manager._structures;
         NeonLetterColorInteractionBackfillWindow window =
-            PromptLifecycle.TakeBackfillWindow(
+            InteractionBackfill.TakeWindow(
                 structures.Count,
                 MaxInteractionBackfillsPerUpdate);
         int endOffset = window.StartOffset + window.Count;
@@ -163,8 +154,6 @@ public static partial class NeonLetterColorRuntime
             return;
         }
 
-        OwnedInteractionInstanceIds.Remove(
-            lease.InteractionInstanceId);
         try
         {
             SOTFNeonLettersUi.OnStructureUnavailable(
@@ -191,12 +180,8 @@ public static partial class NeonLetterColorRuntime
 
     private static void ResetInteractionDiscovery()
     {
-        _isObservingPrompt = false;
         _interactionUpdateTick = 0;
-        OwnedInteractionInstanceIds.Clear();
         InteractionCreationFailures.Clear();
-        PromptLifecycle.Reset();
-        BackfillSchedule.Reset();
-        InteractionFailureGate.ResetPromptFailureReport();
+        InteractionBackfill.Reset();
     }
 }
